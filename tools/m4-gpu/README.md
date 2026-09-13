@@ -39,7 +39,8 @@ Work storage and notifier links remain device-owned, as in the shim. A fatal
 firmware failure fails subsequent work closed and retains potentially live
 storage; recovery requires a device reboot. The frozen host document
 `docs/m4-uapi-deviations.md` defines the port's accepted restrictions, including
-fixed USC base, helper tuple rejection and local-indirect compute rejection.
+fixed USC base and helper tuple rejection. The subsequent user-requested
+local-indirect integration removes that original compute-mode restriction.
 No captured runtime initialization pages are loaded. The proprietary GPU
 firmware itself is supplied by the platform boot chain.
 
@@ -263,3 +264,45 @@ accumulation, indirect compute, GPU page aliases, compressed depth/stencil,
 compute spilling, external dependencies, and render/compute timestamps.
 The final proxy NOP responded. Evidence is in the host repository's
 `docs/evidence/m4-kernel-20260913/memory-publication/`.
+
+## Local-indirect compute (2026-09-13)
+
+The Rust CDM walker now admits mode 2's 24-byte launch and validates readable
+coverage of its full six-word geometry object. Global-indirect still validates
+three words. Geometry can be GPU-produced; the driver checks mappings rather
+than reading dimensions on the CPU. The existing compute Work and asynchronous
+execution path need no new firmware fields or helper binaries.
+
+Build 045 / kernel #34, boot 024 / artifacts 023 passed the host's GLSL
+producer/consumer workload: 18 local-indirect dispatches, 1D/2D/3D workgroups,
+zero-work dimensions and 590,257 exact output/argument/guard checks. The same
+workload passed again with a delayed native input fence and timestamps.
+Global-indirect passed unchanged; deliberately selecting zero-work geometry
+correctly failed the output oracle and subsequent work continued. UAPI checks
+(1,250), R/C/R/C arrays, and exact 200,000-triangle partial accumulation through
+TVB growth/refusal also passed. The final proxy NOP responded.
+
+`local-indirect.c` is a test-only userspace ioctl interposer, built into the
+initramfs as `/local-indirect.so`. It tracks the caller's VM bindings to map
+the current Mesa CDM, changes global-indirect to local-indirect and selects
+the producer's six-word object. It preserves shader fields and stream addresses.
+It neither emulates DRM nor changes the kernel or geometry. Its linear-stream
+and single-CDM-binding requirements are limits of this focused test adapter.
+The source GLSL caller is `tests/hardware/g16g_local_indirect.c` in the host
+m1n1 tree; include its compiled `local-indirect-gl` binary in the Mesa runtime
+archive when building the initramfs.
+
+```sh
+/opt/mesa/run /bin/sh -c 'LD_PRELOAD=/local-indirect.so M4_LOCAL_INDIRECT=local /opt/mesa/bin/local-indirect-gl'
+/opt/mesa/run /bin/sh -c 'LD_PRELOAD=/local-indirect.so M4_LOCAL_INDIRECT=global /opt/mesa/bin/local-indirect-gl'
+# Negative control: output assertion must fail with exit 1.
+/opt/mesa/run /bin/sh -c 'LD_PRELOAD=/local-indirect.so M4_LOCAL_INDIRECT=zero /opt/mesa/bin/local-indirect-gl'
+mount -t debugfs debugfs /sys/kernel/debug
+/opt/mesa/run /bin/sh -c 'LD_PRELOAD=/local-indirect.so:/async-smoke.so /opt/mesa/bin/local-indirect-gl'
+```
+
+The host `tools/check_m4_kernel_cdm.py` passes ten graph/admission cases plus
+five geometry coverage/permission checks against the actual Rust parser.
+Evidence and source/binary identities are in the host repository's
+`docs/evidence/m4-kernel-20260913/local-indirect/`. This is focused driver
+qualification, not geometry/tessellation shader conformance.

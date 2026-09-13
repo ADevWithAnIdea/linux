@@ -24,6 +24,9 @@ aarch64-linux-gnu-gcc -O2 -Wall -Wextra -Werror -I"$build_dir/uapi/include" \
 aarch64-linux-gnu-gcc -O2 -Wall -Wextra -Werror -shared -fPIC \
     -I"$build_dir/uapi/include" "$source_dir/tools/m4-gpu/feature-observe.c" \
     -o "$build_dir/feature-observe.so" -ldl -pthread
+aarch64-linux-gnu-gcc -O2 -Wall -Wextra -Werror -shared -fPIC \
+    -I"$build_dir/uapi/include" "$source_dir/tools/m4-gpu/local-indirect.c" \
+    -o "$build_dir/local-indirect.so" -ldl -pthread
 
 # Use the lab's static AArch64 BusyBox built from /home/lab/busybox source.
 # gen_init_cpio records root ownership and /dev/console without requiring root.
@@ -37,6 +40,7 @@ aarch64-linux-gnu-gcc -O2 -Wall -Wextra -Werror -shared -fPIC \
     printf 'file /async-smoke.so %s/async-smoke.so 0755 0 0\n' "$build_dir"
     printf 'file /uapi-options %s/uapi-options 0755 0 0\n' "$build_dir"
     printf 'file /feature-observe.so %s/feature-observe.so 0755 0 0\n' "$build_dir"
+    printf 'file /local-indirect.so %s/local-indirect.so 0755 0 0\n' "$build_dir"
     printf 'file /init %s/tools/m4-gpu/init 0755 0 0\n' "$source_dir"
     for applet in sh mount umount mkdir hostname uname setsid cttyhack cat dmesg \
                   ls readlink hexdump sleep echo ps head tail wc grep sed awk \
