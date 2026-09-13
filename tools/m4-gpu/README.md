@@ -18,7 +18,18 @@ existing Asahi UAPI. Normal driver initialization is the default;
 
 The frontend uses DRM GEM shmem, scheduler entities, native syncobjs/timelines
 and sync_file fences. SUBMIT copies commands, retains VM/buffer references and
-returns a pending completion fence. One publication/retirement worker fills a
+returns a pending completion fence. Each public queue owns separate firmware
+vertex, fragment and compute queues: descriptors, private state, ring pointers,
+rings, counters, a notifier list and a firmware context. Priority selects the
+shared firmware transport channel for each engine. Active queues lease distinct
+event slots; idle queues release them after retirement. Pending submissions
+retain their queue state after public handle destruction. Firmware allocations,
+including retired queue storage, remain device-owned until reboot.
+Compute uses the M1/M2 queue profile that disables compute preemption. Independent
+queues can be selected out of submission order, but an active compute Work runs
+to completion: the preempting profile lost updates in the multi-queue probes.
+
+One publication/retirement worker fills a
 16-command firmware window without waiting for each command to finish. Firmware
 barriers preserve public-queue command order and protect shared render scratch;
 unique stamps and advancing ring cursors determine completion. The worker polls
@@ -37,7 +48,8 @@ to merely reaching the scheduler's run callback.
 
 Render and compute have separate UAT views of a VM's shared GEM backing. Each
 queued compute owns a fork of the page-table tree and a private resource-table
-snapshot at the caller's original DVA; live roots are never rebound. Those views
+snapshot at the caller's original DVA, plus private scratch and marker pages;
+live roots are never rebound. Those views
 remain owned until VM destruction. A driver-owned full CDM cache barrier followed
 by a link to the caller stream preserves dependent SSBO writes between back-to-back
 Works. The narrower 0x60000168 barrier was insufficient. The link was exercised
@@ -366,3 +378,34 @@ The pipeline, mixed, local-indirect, delayed-fence and timestamp checks pass aga
 Boot 033 / build 058 has the identical kernel image and an updated test binary.
 Destroying the queue/VM with 32 pending compute replays passes all 1,871 checks;
 a fresh above-2-TiB compute pipeline then passes on the same device.
+
+## Independent firmware queues
+
+Build 066 / kernel #51 (boot 039) qualifies separate firmware queues on the M4.
+The source caller `tests/hardware/g16g_async_pipeline.c` in the host repository
+can distribute replays over eight public queues of both supported priorities.
+Its multi-queue compute shader uses an order-independent atomic-add oracle;
+timestamps enforce order only within each queue, and readback waits for all
+queues. No Mesa source or shader binary fixture is changed.
+
+```sh
+/opt/mesa/run /bin/sh -c 'M4_PIPELINE_QUEUES=8 /opt/mesa/bin/async-pipeline-gl 32 200000'
+/opt/mesa/run /bin/sh -c 'M4_PIPELINE_QUEUES=8 M4_PIPELINE_RENDER=1 /opt/mesa/bin/async-pipeline-gl 16 200000'
+/opt/mesa/run /bin/sh -c 'M4_PIPELINE_QUEUES=8 M4_PIPELINE_DESTROY=1 /opt/mesa/bin/async-pipeline-gl 32 200000'
+```
+
+All three pass exact output and timestamp checks. The trace records distinct
+firmware queues/events and a window of 16 unfinished Works. Four simultaneous
+Mesa processes with disjoint buffers also pass, exercising event-slot reuse
+after a queue goes idle. Mixed R/C/R/C, UAPI options, delayed input fences,
+render/compute timestamps and GPU-produced local-indirect geometry pass on the
+same boot. Evidence and failed controls are archived in the host repository at
+`docs/evidence/m4-kernel-20260913/independent-queues/`.
+
+Two formerly global fields needed queue-specific values: the tiling Work's
+fragment event used for partial restart, and consecutive stamp sequences used
+by the firmware dependency graph. Compute preemption remains disabled using
+the same profile overrides as M1/M2; the preempting profile lost data even with
+disjoint client buffers and private per-Work scratch. Polling retirement, the
+global admission window and existing execution barriers remain as described
+above. This is focused bring-up validation, not extensive stress qualification.
