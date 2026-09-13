@@ -5,6 +5,11 @@ The `m4-gpu` branch starts from Asahi Linux 6.19.14,
 Gravity Linux Contributors and licensed GPL-2.0-only. The Rust module uses
 the kernel's `GPL v2` MODULE_LICENSE spelling.
 
+The initial port used the Python DRM shim as its behavioral reference. Ongoing
+development is centered on the Rust driver; matching the shim's source
+structure is no longer a requirement. The existing Asahi UAPI and frozen
+restrictions still apply.
+
 `CONFIG_DRM_ASAHI_M4` builds the Rust T8132 driver and binds `apple,agx-t8132`.
 It starts the ASC firmware, constructs initialization data from source and
 live bootloader inputs, and exposes `/dev/dri/card0` and `renderD128` with the
@@ -208,3 +213,23 @@ not advertised. The experimental `layered-uapi` draw override completed with
 wrong pixels and is not a passing layer oracle. Use the proven layer-clear
 probe above. None of these Mesa limitations changes the frozen kernel UAPI
 restrictions or the driver's source-built firmware state.
+
+## Cleanup regression check (2026-09-13)
+
+The completed-driver baseline is commit `778088823509`. The subsequent cleanup
+shares mapping-coverage validation, names the accepted render flags, removes
+unused timestamp arguments and unused utility/page-table APIs, and simplifies
+render encoders while preserving narrowing conversions and ordered writes.
+Core-dump-only masks now use the same configuration guard as their consumers.
+
+Build 042 / kernel #32 completed without compiler warnings and booted as
+boot 022 / artifacts 021. Fifteen existing Rust encoder outputs matched the
+pre-cleanup Rust outputs byte for byte, including both Work/microsequence
+cases and the 56,442,880-byte private-memory image. Hardware checks passed:
+1,250 UAPI assertions, two pending compute jobs in both rounds, pending
+queue/VM recreation, R/C/R/C mixed arrays, 200,000-triangle partial accumulation
+with a 21-block TVB cap, compressed depth/stencil, both two-layer empty-tile
+flag settings, and render/compute delayed dependencies and timestamps.
+The final proxy NOP responded. Evidence is in the host repository under
+`docs/evidence/m4-kernel-20260913/rust-cleanup/`; this was focused regression
+coverage, not a full stress or conformance run.
