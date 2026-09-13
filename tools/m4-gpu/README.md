@@ -233,3 +233,33 @@ flag settings, and render/compute delayed dependencies and timestamps.
 The final proxy NOP responded. Evidence is in the host repository under
 `docs/evidence/m4-kernel-20260913/rust-cleanup/`; this was focused regression
 coverage, not a full stress or conformance run.
+
+
+## Memory publication review (2026-09-13)
+
+Bulk client-page initialization queues cache cleans without a per-page DSB.
+Address-space publication completes both roots with one barrier. Page-table
+walks now track edited tables: reads do not allocate tracking entries or cause
+cleaning, and subsequent syncs skip unchanged tables. Firmware storage tracks
+pending initialization per page and skips previously published allocations,
+including retained completed Work, instead of repeatedly cleaning all storage.
+
+Live host updates preserve their cache invalidation/cleaning protocol, with
+one barrier after all invalidations and one after all writes in a range.
+Queue-private clearing uses one range (74 barriers become 2); a full ten-block
+TVB list update also uses one range (20 become 2). The barriers ordering list
+entries, counts, replies, doorbells and TLB invalidation remain. Live access
+before a fresh page's initial sync preserves and publishes its CPU initialization.
+No memory-lifetime policy or UAPI restriction changed.
+
+Run the focused host check with `python3 tools/m4-gpu/check-memory.py`. It
+compiles the actual Rust memory methods with page/cache stand-ins to check
+dirty tracking, borrowed tables, metadata allocation failures, cross-page
+writes, guard preservation and barrier counts. It is a bookkeeping model;
+real hardware remains the test of cache/TLB ordering. Build 044 / #33 completed
+without warnings. Boot 023 passed 1,250 UAPI assertions, pending VM teardown,
+two concurrent compute jobs, mixed arrays, TVB growth/refusal and exact partial
+accumulation, indirect compute, GPU page aliases, compressed depth/stencil,
+compute spilling, external dependencies, and render/compute timestamps.
+The final proxy NOP responded. Evidence is in the host repository's
+`docs/evidence/m4-kernel-20260913/memory-publication/`.
