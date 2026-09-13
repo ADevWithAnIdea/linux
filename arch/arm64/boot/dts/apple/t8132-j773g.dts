@@ -1,0 +1,147 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright The Gravity Linux Contributors
+/*
+ * Minimal M4 Mac mini platform for GPU driver bring-up under m1n1.
+ * Register/interrupt definitions from Niklas Sheth's linux-m4-integration
+ * T8132 device trees. Memory and CPU release addresses are filled by m1n1.
+ */
+
+/dts-v1/;
+#include <dt-bindings/interrupt-controller/apple-aic.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+
+/ {
+	model = "Apple Mac mini (M4, 2024)";
+	compatible = "apple,j773g", "apple,t8132", "apple,arm-platform";
+	chassis-type = "desktop";
+	#address-cells = <2>;
+	#size-cells = <2>;
+
+	aliases {
+		serial0 = &serial0;
+		gpu = &gpu;
+	};
+
+	chosen {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+		stdout-path = "serial0";
+	};
+
+	memory@800000000 {
+		device_type = "memory";
+		reg = <0x8 0 0 0>;
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+		uat_ttbs: uat-ttbs { status = "disabled"; };
+		uat_pagetables: uat-pagetables { status = "disabled"; };
+		uat_l2: uat-l2 { status = "disabled"; };
+		uat_handoff: uat-handoff { status = "disabled"; };
+		gpu_firmware: gpu-firmware { status = "disabled"; };
+	};
+
+	cpus {
+		#address-cells = <2>;
+		#size-cells = <0>;
+
+		/* First milestone uses only the boot CPU. */
+		cpu_p0: cpu@10100 {
+			compatible = "apple,donan-p";
+			device_type = "cpu";
+			reg = <0 0x10100>;
+			enable-method = "spin-table";
+			cpu-release-addr = <0 0>;
+		};
+	};
+
+	timer {
+		compatible = "arm,armv8-timer";
+		interrupt-parent = <&aic>;
+		interrupt-names = "phys", "virt", "hyp-phys", "hyp-virt";
+		interrupts = <AIC_FIQ AIC_TMR_GUEST_PHYS IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_FIQ AIC_TMR_GUEST_VIRT IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_FIQ AIC_TMR_HV_PHYS IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_FIQ AIC_TMR_HV_VIRT IRQ_TYPE_LEVEL_HIGH>;
+	};
+
+	clkref: clock-ref {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <24000000>;
+		clock-output-names = "clkref";
+	};
+
+	soc {
+		compatible = "simple-bus";
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+		nonposted-mmio;
+		dma-ranges = <0 0 0 0 0xffffffff 0xffffc000>;
+
+		aic: interrupt-controller@381000000 {
+			compatible = "apple,t8132-aic3", "apple,t8122-aic3";
+			#interrupt-cells = <3>;
+			#address-cells = <0>;
+			interrupt-controller;
+			reg = <0x3 0x81000000 0 0x1cc000>,
+			      <0x3 0x81040000 0 0x4000>;
+			reg-names = "core", "event";
+		};
+
+		pmgr: power-management@380700000 {
+			compatible = "apple,t8132-pmgr", "apple,t8103-pmgr", "syscon", "simple-mfd";
+			#address-cells = <1>;
+			#size-cells = <1>;
+			reg = <0x3 0x80700000 0 0x14000>;
+
+			ps_gfx: power-controller@250 {
+				compatible = "apple,t8132-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+				reg = <0x250 4>;
+				#power-domain-cells = <0>;
+				#reset-cells = <0>;
+				label = "gfx";
+			};
+		};
+
+		serial0: serial@3ad200000 {
+			compatible = "apple,s5l-uart";
+			reg = <0x3 0xad200000 0 0x1000>;
+			reg-io-width = <4>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 1046 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clkref>, <&clkref>;
+			clock-names = "uart", "clk_uart_baud0";
+		};
+
+		gpu: gpu@302600000 {
+			compatible = "apple,agx-t8132";
+			reg = <0x3 0x02600000 0 0x88000>,
+			      <0x3 0 0 0x4000000>;
+			reg-names = "asc", "sgx";
+			power-domains = <&ps_gfx>;
+			mboxes = <&agx_mbox>;
+			memory-region = <&uat_ttbs>, <&uat_pagetables>, <&uat_l2>,
+					<&uat_handoff>, <&gpu_firmware>;
+			memory-region-names = "ttbs", "pagetables", "l2", "handoff", "firmware";
+		};
+
+		agx_mbox: mailbox@302608000 {
+			compatible = "apple,t8103-asc-mailbox", "apple,asc-mailbox-v4";
+			reg = <0x3 0x02608000 0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 993 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 994 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 995 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 996 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "send-empty", "send-not-empty", "recv-empty", "recv-not-empty";
+			#mbox-cells = <0>;
+			power-domains = <&ps_gfx>;
+		};
+	};
+};

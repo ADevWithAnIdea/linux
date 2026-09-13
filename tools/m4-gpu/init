@@ -1,0 +1,18 @@
+#!/bin/busybox sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Copyright The Gravity Linux Contributors
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export HOME=/root
+export TERM=vt100
+export PS1='m4-linux# '
+mount -t devtmpfs devtmpfs /dev
+mkdir -p /dev/pts /dev/shm
+mount -t devpts devpts /dev/pts
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t tmpfs tmpfs /run
+hostname m4
+echo M4_USERSPACE_READY
+uname -a
+echo 'Interactive Linux shell on the M4 m1n1 virtual UART.'
+exec setsid cttyhack /bin/sh
