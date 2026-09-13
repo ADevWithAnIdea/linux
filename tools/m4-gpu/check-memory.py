@@ -52,8 +52,10 @@ def main():
         out = Path(tmp)
         (out / 'pgtable.rs').write_text(cache_ops(tables))
         (out / 'vm.rs').write_text(cache_ops('\n'.join(vm_code)))
+        runtime = (src / 'g16_runtime.rs').read_text()
+        (out / 'pipeline.rs').write_text(block(runtime, 'fn reached('))
         (out / 'test.rs').write_text(Path(__file__).with_name('memory-check.rs').read_text())
-        subprocess.run(['rustc', '--edition=2021', '-Awarnings', str(out / 'test.rs'), '-o', str(out / 'test')], check=True)
+        subprocess.run(['rustc', '--edition=2021', '--cfg', 'test', '-Awarnings', str(out / 'test.rs'), '-o', str(out / 'test')], check=True)
         subprocess.run([str(out / 'test')], check=True)
 
 

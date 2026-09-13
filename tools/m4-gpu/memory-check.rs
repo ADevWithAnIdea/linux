@@ -37,6 +37,7 @@ impl<T> KVec<T> {
     fn new() -> Self {
         Self(Vec::new())
     }
+    fn reserve(&mut self, n: usize, _: u32) -> Result { self.0.reserve(n); Ok(()) }
     fn push(&mut self, item: T, _: u32) -> Result {
         PUSHES.set(PUSHES.get() + 1);
         if let Some(left) = FAIL_PUSH.get() {
@@ -357,9 +358,63 @@ fn check_allocation_errors() {
     }
     println!("PASS allocation errors: dirty/ownership metadata failures retain valid pages, permit retry, and release all table ownership");
 }
+fn check_forks() {
+    use pgtable::{prot::{PROT_GPU_SHARED_RW as RW, PROT_GPU_SHARED_RO as RO}, UatPageTable};
+    let mut source = UatPageTable::new_with_ias(42, 42).unwrap();
+    let addresses = [0x4000u64, 0x2000000, 1 << 36, 1 << 40];
+    for (i, &address) in addresses.iter().enumerate() {
+        source.map_pages(address..address + PAGE as u64, 0x9000000 + i as u64 * PAGE as u64,
+            if i & 1 == 0 { RW } else { RO }, false).unwrap();
+    }
+    source.sync();
+    let page_count = PAGES.with_borrow(|p| p.len());
+    let mut succeeded = false;
+    for fail_after in 0..32 {
+        FAIL_PUSH.set(Some(fail_after));
+        let copied = source.fork();
+        FAIL_PUSH.set(None);
+        match copied {
+            Err(ENOMEM) => (),
+            Err(error) => panic!("unexpected fork error {error}"),
+            Ok(mut copy) => {
+                assert_ne!(copy.ttb(), source.ttb());
+                for &address in &addresses { assert_eq!(copy.leaf(address), source.leaf(address)); }
+                copy.unmap_pages(0x4000..0x8000).unwrap();
+                copy.map_pages(0x4000..0x8000, 0xa000000, RW, false).unwrap();
+                assert_eq!(source.translate(0x4000).unwrap(), Some(0x9000000));
+                source.unmap_pages((1 << 40)..(1 << 40) + PAGE as u64).unwrap();
+                assert_eq!(copy.translate(1 << 40).unwrap(), Some(0x9000000 + 3 * PAGE as u64));
+                succeeded = true;
+            }
+        }
+        assert_eq!(PAGES.with_borrow(|p| p.len()), page_count, "fork unwind leaked or freed source pages");
+        assert_eq!(source.translate(0x4000).unwrap(), Some(0x9000000));
+        if succeeded { break; }
+    }
+    assert!(succeeded);
+    println!("PASS async tree forks: independent parents/leaves, 42-bit addresses, permission preservation, allocation-failure unwind and source lifetime");
+}
 fn main() {
+    check_cursors();
+    check_forks();
     check_tables();
     check_allocation_errors();
     vm::check();
     assert!(PAGES.with_borrow(|p| p.is_empty()));
+}
+
+include!("pipeline.rs");
+fn check_cursors() {
+    for capacity in [256, 0x500] {
+        for target in 0..capacity {
+            assert!(reached(target, target, capacity));
+            for distance in 1..=64 {
+                assert!(reached((target + distance) % capacity, target, capacity));
+                assert!(!reached((target + capacity - distance) % capacity, target, capacity));
+            }
+        }
+        assert!(!reached(capacity, 0, capacity));
+        assert!(!reached(0, capacity, capacity));
+    }
+    println!("PASS retirement cursors: every target in both rings, forward/backward windows, wrap and invalid cursors");
 }

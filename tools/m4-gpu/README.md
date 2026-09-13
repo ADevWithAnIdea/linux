@@ -17,22 +17,39 @@ existing Asahi UAPI. Normal driver initialization is the default;
 `asahi_m4.probe_only=1` selects the earlier identification-only mode.
 
 The frontend uses DRM GEM shmem, scheduler entities, native syncobjs/timelines
-and sync_file fences. SUBMIT copies commands and retains VM/buffer references,
-then returns a pending completion fence. Input fences gate the execution worker.
-One hardware job executes at a time, matching the known-working Python shim.
-The worker polls firmware retirement with a bounded timeout; mapping changes
-and context teardown drain the actual worker fences before detaching roots.
-VM_DESTROY removes the public handle while existing queues retain the VM.
-The last retaining queue releases its page-table trees and pinned backing.
-This is asynchronous to userspace, with serialized hardware execution.
+and sync_file fences. SUBMIT copies commands, retains VM/buffer references and
+returns a pending completion fence. One publication/retirement worker fills a
+16-command firmware window without waiting for each command to finish. Firmware
+barriers preserve public-queue command order and protect shared render scratch;
+unique stamps and advancing ring cursors determine completion. The worker polls
+retirement, sleeping 1 ms when there is no progress. Its watchdog detects ten
+seconds without retirement progress. Mapping changes and context teardown drain
+actual completion fences before detaching roots.
 
-Render and compute have separate UAT views of a VM's shared GEM backing. The
-port follows the shim's Work/microsequence encoding, fixed private namespaces,
-resource-table snapshotting and per-context TVB ownership. TVB growth uses
-source-built lists and retained pages. Firmware timestamp microcommands write
-private per-Work slots at 24 MHz; the worker converts them to nanoseconds and
-copies them into bound timestamp BOs before signaling completion. GET_TIME
-uses the architectural counter and its own frequency.
+Input syncobj fences remain scheduler dependencies on actual completion; they
+are not translated into firmware waits. This also protects CPU reads of
+GPU-produced CDM/resource metadata. A batch's declared compute dependencies can
+therefore require a host wait; independent public queues can still publish.
+The hardware window is real, but it does not imply arbitrary parallel execution:
+commands on a public queue stay ordered and render scratch is shared. Output
+syncobjs use the actual completion fence so DRM cannot downgrade their dependencies
+to merely reaching the scheduler's run callback.
+
+Render and compute have separate UAT views of a VM's shared GEM backing. Each
+queued compute owns a fork of the page-table tree and a private resource-table
+snapshot at the caller's original DVA; live roots are never rebound. Those views
+remain owned until VM destruction. A driver-owned full CDM cache barrier followed
+by a link to the caller stream preserves dependent SSBO writes between back-to-back
+Works. The narrower 0x60000168 barrier was insufficient. The link was exercised
+with a caller CDM address above 2 TiB; caller BO bytes remain unchanged.
+
+TVB growth uses source-built lists and retained pages. Replies include the
+request's subpipe and halt counter, including requests for queued work. Firmware
+timestamp microcommands write private per-Work slots at 24 MHz; the worker converts
+them to nanoseconds and copies them into bound timestamp BOs before signaling
+completion. GET_TIME uses the architectural counter and its own frequency.
+VM_DESTROY removes the public handle while existing queues retain the VM;
+its final queue releases the page-table trees and pinned backing.
 
 GEM mappings and retired backing stay pinned until VM destruction. Firmware
 Work storage and notifier links remain device-owned, as in the shim. A fatal
@@ -306,3 +323,46 @@ five geometry coverage/permission checks against the actual Rust parser.
 Evidence and source/binary identities are in the host repository's
 `docs/evidence/m4-kernel-20260913/local-indirect/`. This is focused driver
 qualification, not geometry/tessellation shader conformance.
+
+## Hardware pipeline checks
+
+The host `tests/hardware/g16g_async_pipeline.c` uses GLES and the public Asahi UAPI.
+It replays one Mesa command in separate SUBMITs, orders them with queue-header
+barriers, and deliberately omits input-fence links between replays. Per-submission
+syncobjs and timestamp slots verify completion and order; exact SSBO arithmetic
+or additive pixels verify that earlier writes are visible. The test contains no
+firmware layout or shader binary and reuses `drm-shim-suite/src/gl.c`.
+
+Build it in the AArch64 Mesa environment with `-rdynamic`, the installed kernel
+UAPI headers, and `-lEGL -lGLESv2 -ldl -lm`. Include the resulting `async-pipeline-gl`
+in the host Mesa runtime packer. On a kernel booted with `asahi_m4.fw_trace=1`:
+
+```sh
+/opt/mesa/run /opt/mesa/bin/async-pipeline-gl 32 200000
+/opt/mesa/run /bin/sh -c 'M4_PIPELINE_RENDER=1 /opt/mesa/bin/async-pipeline-gl 16 200000'
+/opt/mesa/run /bin/sh -c 'M4_PIPELINE_HIGH_CDM=1 /opt/mesa/bin/async-pipeline-gl 8 200000'
+```
+
+For the partial-render check, boot with `asahi_m4.tvb_max_blocks=21`. The default
+remains 331. `M4_PIPELINE_SERIAL=1` waits after every SUBMIT as a control;
+`M4_PIPELINE_ATOMIC=1` selects atomic SSBO accesses. `M4_PIPELINE_DESTROY=1`
+destroys the compute queue and VM before the normal completion wait and requires
+that work was still pending when teardown began. The optional high-CDM check
+requires a VM supporting 42-bit addresses. `unfinished_stamps=16` in the kernel
+trace establishes actual firmware occupancy; pending userspace fences alone do
+not establish that. `check-memory.py` also checks tree-fork ownership/failure
+unwind and wrap-safe completion cursor comparisons using actual Rust methods.
+
+Initial passing hardware evidence: build 053 / kernel #39, boot 030. Thirty-two
+compute submissions pass through the 16-command window; sixteen partial renders
+produce exactly 3,200,000 contributions, with growth/refusal on subpipes 0 and 1.
+Mixed arrays, delayed inputs, timestamps, local-indirect geometry and UAPI checks
+also pass. Build 054 / boot 031 additionally passes the above-2-TiB CDM alias.
+Full evidence is in the host `docs/evidence/m4-kernel-20260913/hardware-pipeline/`.
+This is focused regression coverage, not an extensive stress or conformance run.
+
+Final driver qualification: warning-free build 057 / kernel #43, boot 032 / artifacts 032.
+The pipeline, mixed, local-indirect, delayed-fence and timestamp checks pass again.
+Boot 033 / build 058 has the identical kernel image and an updated test binary.
+Destroying the queue/VM with 32 pending compute replays passes all 1,871 checks;
+a fresh above-2-TiB compute pipeline then passes on the same device.
