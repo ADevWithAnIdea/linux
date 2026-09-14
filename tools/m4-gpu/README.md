@@ -58,24 +58,27 @@ Input syncobj fences remain scheduler dependencies on actual completion. The
 worker resolves UAPI VDM/CDM barrier indices independently: NONE permits
 independent work, zero refers to the preceding submission, and N selects the
 Nth preceding command on that engine in the current batch. Declared dependencies
-wait for firmware completion events before publication, which also protects CPU
-reads of GPU-produced CDM/resource metadata. Output syncobjs use actual completion
-fences with independent fence contexts, so a later compute completion cannot
+become type-1 firmware barriers before the consumer TA or CDM Work. The worker
+can prepare and batch consumers before their producers finish; it never reads
+caller CDM or shader resource data on the CPU. Output syncobjs use actual
+completion fences with independent fence contexts, so a later compute completion cannot
 incorrectly imply completion of an earlier render.
 
-Render and compute have separate UAT views of a VM's shared GEM backing. Each
-queued compute owns a private root and copies only page-table branches it
-modifies; unchanged branches remain shared with the parent VM. The parent lock
-serializes CPU access and views are destroyed before parent tables. Each Work
-also owns a private resource-table snapshot at the caller's original DVA, plus
-private scratch and marker pages. Live roots are never rebound. Those views
-remain owned until VM destruction. Firmware Work storage is allocated and
-mapped in chunks of sixteen slots; every slot stays distinct and retained,
+Render and compute have separate persistent UAT roots of a VM's shared GEM
+backing. Compute commands share the compute root and its ASID. Each command
+allocates fresh zeroed scratch (128 KiB) and a marker (16 KiB) at distinct VAs
+in the VM's reserved kernel aperture. Backing remains owned until VM destruction;
+failed allocations consume their reservation without replacing earlier mappings.
+Firmware save storage occupies the zeroed upper half of each Work's GPU alias
+(+0x2000), independently of caller shader resources. There is no CPU CDM parser,
+resource-page copy, PTE overlay or per-command page-table fork. Firmware Work
+storage is allocated and mapped in chunks of sixteen slots; every slot stays distinct and retained,
 including its notifier links and completion stamps. Render tails retain their
 separate shared mapping permissions. A driver-owned full CDM cache barrier
 followed by a link to the caller stream preserves dependent SSBO writes between
-back-to-back Works. The narrower 0x60000168 barrier was insufficient. The link was exercised
-with a caller CDM address above 2 TiB; caller BO bytes remain unchanged.
+back-to-back computes. The narrower 0x60000168 barrier was insufficient. This
+entry barrier does not replace the caller's post-dispatch cache boundary before
+an intervening render. The link was exercised with a caller CDM address above 2 TiB; caller BO bytes remain unchanged.
 
 TVB growth uses source-built lists and retained pages. Replies include the
 request's subpipe and halt counter, including requests for queued work. Firmware
@@ -212,7 +215,7 @@ limited the TVB to 21 blocks and verified exact additive accumulation of all
 
 The host checks `tools/check_m4_kernel_wire.py`, `check_m4_kernel_render.py`
 and `check_m4_kernel_cdm.py` compare a small set of actual Rust constructors
-and CDM admission cases against Python. They are porting checks, not an
+and relocated compute/dependency encodings against Python. They are porting checks, not an
 extensive hardware or conformance suite. Vulkan, display and multi-CPU Linux
 qualification are outside the recorded validation.
 
@@ -318,11 +321,11 @@ The final proxy NOP responded. Evidence is in the host repository's
 
 ## Local-indirect compute (2026-09-13)
 
-The Rust CDM walker now admits mode 2's 24-byte launch and validates readable
-coverage of its full six-word geometry object. Global-indirect still validates
-three words. Geometry can be GPU-produced; the driver checks mappings rather
-than reading dimensions on the CPU. The existing compute Work and asynchronous
-execution path need no new firmware fields or helper binaries.
+The initial Rust port admitted mode 2's 24-byte launch through a CPU CDM walker.
+The firmware-dependency integration below removes that walker entirely. Local
+and global indirect geometry is consumed by the GPU; ordinary UAPI ranges and
+GPU mapping permissions still apply. The existing compute Work and asynchronous
+execution path need no additional firmware fields or helper binaries.
 
 Build 045 / kernel #34, boot 024 / artifacts 023 passed the host's GLSL
 producer/consumer workload: 18 local-indirect dispatches, 1D/2D/3D workgroups,
@@ -384,8 +387,9 @@ destroys the compute queue and VM before the normal completion wait and requires
 that work was still pending when teardown began. The optional high-CDM check
 requires a VM supporting 42-bit addresses. `unfinished_stamps=16` in the kernel
 trace establishes actual firmware occupancy; pending userspace fences alone do
-not establish that. `check-memory.py` also checks tree-fork ownership/failure
-unwind and wrap-safe completion cursor comparisons using actual Rust methods.
+not establish that. `check-memory.py` now checks persistent compute roots,
+private backing, caller PTE preservation, allocation failure/teardown and
+wrap-safe completion cursor comparisons using actual Rust methods.
 
 Initial passing hardware evidence: build 053 / kernel #39, boot 030. Thirty-two
 compute submissions pass through the 16-command window; sixteen partial renders
@@ -543,3 +547,42 @@ batching tests cover allocation failure and ring wrap. This establishes
 correctness of the changes, not a throughput benchmark against M1/M2.
 Evidence is in the host tree under
 `docs/evidence/m4-kernel-20260913/submission-performance/`.
+
+## Firmware dependencies and persistent compute VMs
+
+The kernel incorporates the shim's qualified save-storage and dependency ABI.
+General barriers use the producer's retained firmware stamp, target and event
+slot. Internal TA-to-fragment barriers retain type zero for partial rendering.
+Ring admission includes every dependency, InitBM and Work entry. Firmware Work,
+stamp and notifier ownership and external dma-fence completion semantics remain
+unchanged. Queue event leases cover all pending commands on that public queue.
+
+`asahi_m4.fw_trace=8` reports each staged command's context and count of unfinished
+dependencies, independently of firmware KTrace. Combine with bits 2/4 (`14`) to
+observe backpressure and batches. This diagnostic does not gate admission.
+
+The source contract and hardware records are in the host tree's
+`docs/g16g-firmware-dependencies.md` and
+`docs/evidence/m4-kernel-20260914/firmware-dependencies/`. Render preemption remains
+unqualified; the existing execution profile still runs active engine work to
+completion.
+
+The 64-command mixed dataflow caller exposed Apple9 Mesa's narrow compute tail
+(`0x60000160`). Copying its stream alone still returns stale SSBO data despite
+correct GPU timestamp order. Inserting the full post-dispatch barrier in the
+test caller passes repeated partials, TVB growth and all pixel/MRT oracles;
+omitting the middle render fails as intended. The driver remains opaque to
+CDM and Mesa source is unchanged. The host handoff note is
+`docs/g16g-mixed-cdm-cache-boundary.md`. Kernel-side CPU dependency waits and
+experimental identity/cache controls are absent from the integrated version.
+
+Build 123 / boot 085 / kernel #91 passes the 64-command mixed pressure array
+with the caller's full CDM tail and every GPU dependency interval checked.
+Sixty-four compute Works share ASID 1 and retire from one message/kick (66,487
+checks). GPU-produced local-indirect geometry passes 590,257 checks across
+36 submissions, including delayed-input asynchronous return and timestamps.
+Earlier boot 074 also passes independent mixed overlap, mapping while busy and
+eight-queue destruction with work pending. Final memory, scheduling, batching,
+notification, render/compute wire and Rust formatting checks pass. These are
+focused correctness checks under the one-P-core hypervisor configuration,
+not throughput measurements or conformance qualification.

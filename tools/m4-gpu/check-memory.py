@@ -42,17 +42,24 @@ def main():
     tables = 'use super::*; use crate::util::align; use core::sync::atomic::{AtomicU64, Ordering};\n' + tables[tables.index('/// Number of bits in a page offset.'):]
     vm = (src / 'g16_vm.rs').read_text()
     impl = vm[vm.index('impl FirmwareSpace {'):]
-    vm_code = ['use super::*; use pgtable::{UatPageTable, UAT_PGSZ};',
+    vm_code = ['use super::*; use pgtable::{prot, UatPageTable, UAT_PGSZ};',
                block(vm, 'struct FirmwareRegion {'), block(vm, 'pub(crate) struct FirmwareSpace {'),
                block(vm, 'fn clean_page('), 'impl FirmwareSpace {']
     for name in ('alloc', 'write', 'init_page', 'write_live', 'zero_live', 'update_live', 'sync'):
         vm_code.append(block(impl, ('fn ' if name == 'update_live' else 'pub(crate) fn ') + name + '('))
+    vm_code.append('}')
+    vm_code += [re.search(r'const IAS:[^;]+;', vm)[0], re.search(r'const OAS:[^;]+;', vm)[0],
+                '#[derive(Clone,Copy)]', block(vm, 'pub(crate) struct Roots {'),
+                block(vm, 'pub(crate) struct AddressSpace {'), 'impl AddressSpace {']
+    for name in ('new', 'roots', 'alloc_low', 'init_compute_private', 'prepare_compute', 'sync'):
+        vm_code.append(block(vm, 'pub(crate) fn ' + name + '('))
     vm_code.append('}')
     with tempfile.TemporaryDirectory(prefix='m4-memory-') as tmp:
         out = Path(tmp)
         (out / 'pgtable.rs').write_text(cache_ops(tables))
         (out / 'vm.rs').write_text(cache_ops('\n'.join(vm_code)))
         runtime = (src / 'g16_runtime.rs').read_text()
+        (out / 'compute.rs').write_text((src / 'g16_compute.rs').read_text())
         (out / 'pipeline.rs').write_text(block(runtime, 'fn reached('))
         (out / 'test.rs').write_text(Path(__file__).with_name('memory-check.rs').read_text())
         subprocess.run(['rustc', '--edition=2021', '--cfg', 'test', '-Awarnings', str(out / 'test.rs'), '-o', str(out / 'test')], check=True)

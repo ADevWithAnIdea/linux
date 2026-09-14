@@ -361,52 +361,54 @@ fn check_allocation_errors() {
     }
     println!("PASS allocation errors: dirty/ownership metadata failures retain valid pages, permit retry, and release all table ownership");
 }
-fn check_forks() {
-    use pgtable::{prot::{PROT_GPU_SHARED_RW as RW, PROT_GPU_SHARED_RO as RO}, UatPageTable};
-    let mut source = UatPageTable::new_with_ias(42, 42).unwrap();
-    let addresses = [0x4000u64, 0x2000000, 1 << 36, 1 << 40];
-    for (i, &address) in addresses.iter().enumerate() {
-        source.map_pages(address..address + PAGE as u64, 0x9000000 + i as u64 * PAGE as u64,
-            if i & 1 == 0 { RW } else { RO }, false).unwrap();
-    }
-    source.sync();
-    let page_count = PAGES.with_borrow(|p| p.len());
-    let mut succeeded = false;
-    for fail_after in 0..32 {
-        FAIL_PUSH.set(Some(fail_after));
-        let copied = unsafe { source.fork() };
-        FAIL_PUSH.set(None);
-        match copied {
-            Err(ENOMEM) => (),
-            Err(error) => panic!("unexpected fork error {error}"),
-            Ok(mut copy) => {
-                assert_ne!(copy.ttb(), source.ttb());
-                assert_eq!(PAGES.with_borrow(|p| p.len()), page_count + 1,
-                    "fork allocates only a root before private edits");
-                for &address in &addresses { assert_eq!(copy.leaf(address), source.leaf(address)); }
-                copy.unmap_pages(0x4000..0x8000).unwrap();
-                copy.map_pages(0x4000..0x8000, 0xa000000, RW, false).unwrap();
-                assert_eq!(source.translate(0x4000).unwrap(), Some(0x9000000));
-                // Unchanged branches share tables. Fresh parent bindings can
-                // appear in those branches while existing jobs keep stable VAs.
-                source.map_pages((1 << 40) + PAGE as u64..(1 << 40) + 2 * PAGE as u64,
-                                 0xb000000, RW, false).unwrap();
-                assert_eq!(copy.translate((1 << 40) + PAGE as u64).unwrap(), Some(0xb000000));
-                succeeded = true;
-            }
+
+#[path="compute.rs"] mod g16_compute;
+fn check_compute_storage() {
+    let baseline = PAGES.with_borrow(|p| p.len());
+    let mut vm = vm::AddressSpace::new().unwrap();
+    let roots = vm.roots();
+    let base = 0x6800000000u64;
+    vm.init_compute_private(base..base + 37 * 0x24000);
+    // Original shader resources, including their permissions, stay untouched.
+    vm.low.map_pages(0x10000058000..0x1000005c000, 0x9000000,
+        pgtable::prot::PROT_GPU_SHARED_RO, false).unwrap();
+    let original = vm.low.leaf(0x10000058000).unwrap();
+    let mut p = g16_compute::Parameters {cdm:0x1400000000, cdm_end:0x1400000040,
+        sampler:0,sampler_count:0,scratch:0,marker:0,save_area:0};
+    let mut physical = std::collections::BTreeSet::new();
+    for _ in 0..36 {
+        vm.prepare_compute(&mut p).unwrap();
+        assert_eq!(vm.roots().low, roots.low);
+        assert_eq!(vm.roots().high, roots.high);
+        assert_eq!(p.marker, p.scratch + 0x20000);
+        for va in (p.scratch..p.marker + 0x4000).step_by(PAGE) {
+            let pa = vm.low.translate(va).unwrap().unwrap();
+            assert!(physical.insert(pa), "live Works must not share scratch backing");
+            let page = unsafe { Page::borrow_phys_unchecked(&pa) };
+            page.with_pointer_into_page(0,PAGE,|ptr| {
+                assert!(unsafe { std::slice::from_raw_parts(ptr,PAGE) }.iter().all(|b|*b==0));
+                Ok(())
+            }).unwrap();
         }
-        assert_eq!(PAGES.with_borrow(|p| p.len()), page_count, "fork unwind leaked or freed source pages");
-        assert_eq!(source.translate(0x4000).unwrap(), Some(0x9000000));
-        if succeeded { break; }
     }
-    assert!(succeeded);
-    println!("PASS async tree forks: shared unchanged branches, private edited leaves, 42-bit addresses, permission preservation, allocation-failure unwind and source lifetime");
+    assert_eq!(vm.low.leaf(0x10000058000).unwrap(), original);
+    for address in [g16_compute::SCRATCH, g16_compute::MARKER] {
+        assert_eq!(vm.low.translate(address).unwrap(),None);
+    }
+    FAIL_PUSH.set(Some(0));
+    assert_eq!(vm.prepare_compute(&mut p),Err(ENOMEM));
+    FAIL_PUSH.set(None);
+    assert_eq!(vm.prepare_compute(&mut p),Err(ENOMEM), "failed reservation is not reused");
+    assert_eq!(vm.low.leaf(0x10000058000).unwrap(), original);
+    drop(vm);
+    assert_eq!(PAGES.with_borrow(|p|p.len()),baseline,"VM destruction releases all private backing");
+    println!("PASS compute storage: 36 commands share roots, distinct zeroed backing, caller RO PTE unchanged, no fixed scratch aliases, exhaustion/failure retention and VM teardown");
 }
+
 fn main() {
+    check_compute_storage();
     check_invalidations();
-    check_private_branch_failures();
     check_cursors();
-    check_forks();
     check_tables();
     check_allocation_errors();
     vm::check();
@@ -445,25 +447,4 @@ fn check_invalidations() {
     table.unmap_pages(0x8000..0xc000).unwrap(); table.sync(); table.invalidate(None);
     assert_eq!(TLB.with_borrow(|v| v.clone()),vec![(None,0x8000,0xc000)]);
     println!("PASS targeted TLB: adjacent edits merge, disjoint mappings stay separate, ASID/global VA scope, clean sync does not invalidate");
-}
-
-fn check_private_branch_failures() {
-    use pgtable::{UatPageTable,prot::PROT_GPU_SHARED_RW as RW};
-    let mut source=UatPageTable::new_with_ias(42,42).unwrap();
-    source.map_pages(0x4000..0x8000,0x9000000,RW,false).unwrap(); source.sync();
-    let before=PAGES.with_borrow(|p|p.len());
-    let mut failures=0;
-    for boundary in 0..24 {
-        let mut copy=unsafe { source.fork().unwrap() };
-        FAIL_PUSH.set(Some(boundary));
-        let result=copy.unmap_pages(0x4000..0x8000);
-        FAIL_PUSH.set(None);
-        if result==Err(ENOMEM) { failures+=1; }
-        else { result.unwrap(); assert_eq!(copy.translate(0x4000).unwrap(),None); }
-        assert_eq!(source.translate(0x4000).unwrap(),Some(0x9000000));
-        drop(copy);
-        assert_eq!(PAGES.with_borrow(|p|p.len()),before,"private branch failure leaked pages");
-    }
-    assert!(failures>=4);
-    println!("PASS private branch allocation failures: source unchanged and all partial copies reclaimed");
 }
