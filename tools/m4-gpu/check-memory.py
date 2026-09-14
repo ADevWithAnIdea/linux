@@ -25,6 +25,8 @@ def block(source, marker):
 
 
 def cache_ops(source):
+    source = source.replace('core::arch::asm!("dc ivac, {addr}", "dsb sy", addr = in(reg) p)',
+                            '{ crate::cache::invalidate(p); crate::mem::sync(); }')
     source = re.sub(r'core::arch::asm!\("dc cvac, \{addr\}", addr = in\(reg\) p.add\(off\)\)',
                     'crate::cache::clean(p.add(off))', source)
     source = re.sub(r'core::arch::asm!\("dc ivac, \{addr\}", addr = in\(reg\) p.add\(off\)\)',
@@ -45,13 +47,17 @@ def main():
     vm_code = ['use super::*; use pgtable::{prot, UatPageTable, UAT_PGSZ};',
                block(vm, 'struct FirmwareRegion {'), block(vm, 'pub(crate) struct FirmwareSpace {'),
                block(vm, 'fn clean_page('), 'impl FirmwareSpace {']
-    for name in ('alloc', 'write', 'init_page', 'write_live', 'zero_live', 'update_live', 'sync'):
-        vm_code.append(block(impl, ('fn ' if name == 'update_live' else 'pub(crate) fn ') + name + '('))
+    for name in ('alloc', 'write', 'init_page', 'write_live', 'zero_live', 'update_live',
+                 'sync', 'region', 'queue_region', 'release_region', 'read_u32'):
+        vm_code.append(block(impl, ('fn ' if name in ('update_live', 'region', 'queue_region')
+                                   else 'pub(crate) fn ') + name + '('))
     vm_code.append('}')
+    vm_code.append(block(vm, 'impl Drop for FirmwareSpace'))
     vm_code += [re.search(r'const IAS:[^;]+;', vm)[0], re.search(r'const OAS:[^;]+;', vm)[0],
                 '#[derive(Clone,Copy)]', block(vm, 'pub(crate) struct Roots {'),
                 block(vm, 'pub(crate) struct AddressSpace {'), 'impl AddressSpace {']
-    for name in ('new', 'roots', 'alloc_low', 'init_compute_private', 'prepare_compute', 'sync'):
+    for name in ('new', 'roots', 'alloc_low', 'alloc_tvb_blocks', 'write_low',
+                 'init_compute_private', 'prepare_compute', 'sync'):
         vm_code.append(block(vm, 'pub(crate) fn ' + name + '('))
     vm_code.append('}')
     with tempfile.TemporaryDirectory(prefix='m4-memory-') as tmp:

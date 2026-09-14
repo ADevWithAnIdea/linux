@@ -32,6 +32,50 @@ thread_local! {
     static TLB: RefCell<Vec<(Option<u8>,u64,u64)>> = const { RefCell::new(Vec::new()) };
     static PUSHES: Cell<usize> = const { Cell::new(0) };
     static FAIL_PUSH: Cell<Option<usize>> = const { Cell::new(None) };
+    static TREE_GETS: Cell<usize> = const { Cell::new(0) };
+    static FAIL_NODE: Cell<Option<usize>> = const { Cell::new(None) };
+}
+// The kernel supplies balanced RB trees. This stand-in preserves their public
+// lookup/cursor/ownership semantics and injects node-allocation failures.
+struct RBTree<K, V>(BTreeMap<K, V>);
+struct RBTreeNode<K, V>(K, V);
+struct Cursor<'a, K, V>(&'a BTreeMap<K, V>, &'a K);
+impl<K: Ord, V> RBTree<K, V> {
+    fn new() -> Self { Self(BTreeMap::new()) }
+    fn get(&self, key: &K) -> Option<&V> {
+        TREE_GETS.set(TREE_GETS.get() + 1);
+        self.0.get(key)
+    }
+    fn insert(&mut self, node: RBTreeNode<K, V>) -> Option<RBTreeNode<K, V>> {
+        let old = self.0.remove_entry(&node.0).map(|(k,v)| RBTreeNode(k,v));
+        self.0.insert(node.0, node.1);
+        old
+    }
+    fn try_create_and_insert(&mut self, key: K, value: V, flags: u32) -> Result {
+        self.insert(RBTreeNode::new(key, value, flags)?);
+        Ok(())
+    }
+    fn remove(&mut self, key: &K) -> Option<V> { self.0.remove(key) }
+    fn values(&self) -> impl Iterator<Item=&V> { self.0.values() }
+    fn cursor_lower_bound(&self, key: &K) -> Option<Cursor<'_, K,V>> {
+        self.0.range(key..).next().map(|(k,_)| Cursor(&self.0,k))
+    }
+    fn cursor_back(&self) -> Option<Cursor<'_, K,V>> {
+        self.0.last_key_value().map(|(k,_)| Cursor(&self.0,k))
+    }
+}
+impl<K, V> RBTreeNode<K,V> {
+    fn new(key: K, value: V, _: u32) -> Result<Self> {
+        if let Some(left) = FAIL_NODE.get() {
+            if left == 0 { FAIL_NODE.set(None); return Err(ENOMEM); }
+            FAIL_NODE.set(Some(left - 1));
+        }
+        Ok(Self(key,value))
+    }
+}
+impl<K: Ord, V> Cursor<'_, K,V> {
+    fn current(&self) -> (&K,&V) { self.0.get_key_value(self.1).unwrap() }
+    fn peek_prev(&self) -> Option<(&K,&V)> { self.0.range(..self.1).next_back() }
 }
 struct KVec<T>(Vec<T>);
 impl<T> KVec<T> {
@@ -76,6 +120,11 @@ impl<'a, T> IntoIterator for &'a KVec<T> {
     fn into_iter(self) -> Self::IntoIter {
         self.0.iter()
     }
+}
+impl<T> IntoIterator for KVec<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+    fn into_iter(self) -> Self::IntoIter { self.0.into_iter() }
 }
 struct Page {
     phys: u64,
@@ -195,7 +244,7 @@ mod vm {
     fn image(space: &FirmwareSpace) -> Vec<u8> {
         space
             .regions
-            .iter()
+            .values()
             .flat_map(|r| r.pages.iter().flat_map(|p| p.device_bytes()))
             .collect()
     }
@@ -203,7 +252,8 @@ mod vm {
         let base = 0x40000;
         let mut space = FirmwareSpace {
             table: UatPageTable::new_with_ias(42, 42).unwrap(),
-            regions: KVec::new(),
+            regions: RBTree::new(),
+            dirty_regions: RefCell::new(KVec::new()),
             external: KVec::new(),
         };
         space
@@ -224,8 +274,8 @@ mod vm {
         space.sync();
         assert_eq!(CLEAN.get(), 0);
         // Firmware updates neighbors in the same cache lines as a host write.
-        space.regions[0].pages[0].device_write(PAGE - 8, &[0x5a; 5]);
-        space.regions[0].pages[2].device_write(8, &[0xa5; 7]);
+        space.regions.get(&base).unwrap().pages[0].device_write(PAGE - 8, &[0x5a; 5]);
+        space.regions.get(&base).unwrap().pages[2].device_write(8, &[0xa5; 7]);
         let mut expected = image(&space);
         let bytes: Vec<_> = (0..PAGE + 8).map(|i| (i % 251) as u8).collect();
         expected[PAGE - 3..2 * PAGE + 5].copy_from_slice(&bytes);
@@ -253,7 +303,7 @@ mod vm {
         space.write_live(next + 7, &[0xcd]).unwrap();
         assert_eq!(INVALIDATE.get(), 0);
         assert_eq!(CLEAN.get(), PAGE / 64);
-        let page = &space.regions[1].pages[0];
+        let page = &space.regions.get(&next).unwrap().pages[0];
         let data = page.device_bytes();
         assert_eq!((data[5], data[7], data[6]), (0xab, 0xcd, 0));
         reset();
@@ -276,7 +326,7 @@ mod vm {
         reset();
         space.sync();
         assert_eq!(CLEAN.get(), PAGE / 64);
-        assert_eq!(space.regions[1].pages[0].device_bytes()[41], 0x67);
+        assert_eq!(space.regions.get(&next).unwrap().pages[0].device_bytes()[41], 0x67);
         let before = image(&space);
         reset();
         assert_eq!(space.write_live(u64::MAX - 3, &[1; 8]), Err(EINVAL));
@@ -285,12 +335,96 @@ mod vm {
         assert_eq!(image(&space), before);
         assert_eq!(BARRIERS.get(), 0);
         println!("PASS firmware memory: dirty-only cleaning, three-page writes, two-page zeroing, firmware neighbors, initialization, errors, two barriers per batch");
+
+        // Grow history in non-address order. A clean sync must perform no
+        // region/table lookups, while one dirty region needs just one lookup.
+        let history = 0x1000000;
+        for i in 0..128u64 {
+            let va = history + ((i * 73) % 128) * 2 * PAGE as u64;
+            space.alloc(va, PAGE, pgtable::prot::PROT_FW_PRIV_RW).unwrap();
+            space.write(va, &(i as u32).to_le_bytes()).unwrap();
+        }
+        space.sync();
+        reset();
+        space.sync();
+        assert_eq!((TREE_GETS.get(), CLEAN.get()), (0, 0));
+        for i in 0..128u64 {
+            let va = history + ((i * 73) % 128) * 2 * PAGE as u64;
+            assert_eq!(space.read_u32(va).unwrap(), i as u32);
+            assert!(space.region(va + PAGE as u64, 1).is_err());
+            assert!(space.region(va + PAGE as u64 - 1, 2).is_err());
+        }
+        assert!(space.region(base - 1, 1).is_err());
+        assert!(space.region(u64::MAX, 1).is_err());
+        space.write(history + 2, &[0x11]).unwrap();
+        space.write(history + 3, &[0x22]).unwrap();
+        assert_eq!(space.dirty_regions.borrow().len(), 1);
+        reset();
+        space.sync();
+        assert_eq!((TREE_GETS.get(), CLEAN.get()), (1, PAGE / 64));
+
+        // Publishing a dirty page live must not duplicate its region entry,
+        // and a subsequent unpublished edit must still reach the device.
+        space.write(history, &[0x33]).unwrap();
+        space.write_live(history + 1, &[0x44]).unwrap();
+        space.write(history + 2, &[0x55]).unwrap();
+        assert_eq!(space.dirty_regions.borrow().len(), 1);
+        space.sync();
+        assert_eq!(space.read_u32(history).unwrap(), 0x22554433);
+
+        // Queue-allocation failure must precede the byte write and membership.
+        FAIL_PUSH.set(Some(0));
+        assert_eq!(space.write(history, &[0xff]), Err(ENOMEM));
+        assert!(space.dirty_regions.borrow().is_empty());
+        assert_eq!(space.read_u32(history).unwrap(), 0x22554433);
+        space.write(history, &[0xaa]).unwrap();
+        let keep = history + 2 * PAGE as u64;
+        space.write(keep, &[0xbb]).unwrap();
+        space.release_region(history).unwrap();
+        assert_eq!(&**space.dirty_regions.borrow(), &[keep]);
+        assert_eq!(space.read_u32(history), Err(EINVAL));
+        space.alloc(history, PAGE, pgtable::prot::PROT_FW_PRIV_RW).unwrap();
+        space.alloc(history + PAGE as u64, PAGE, pgtable::prot::PROT_FW_PRIV_RW).unwrap();
+        assert_eq!(space.write(history + PAGE as u64 - 1, &[1,2]), Err(EINVAL));
+        assert_eq!(space.alloc(history, PAGE, pgtable::prot::PROT_FW_PRIV_RW), Err(EEXIST));
+        space.sync();
+        assert_eq!(space.read_u32(history).unwrap(), 0);
+        assert_eq!(space.read_u32(keep).unwrap() & 0xff, 0xbb);
+        reset();
+        space.sync();
+        assert_eq!((TREE_GETS.get(), CLEAN.get()), (0,0));
+        println!("PASS indexed firmware memory: 128 out-of-order regions, bounds/gaps/adjacency, empty-sync zero lookups, one dirty-region lookup, live-write/re-dirty, queue failure, pending removal and VA reuse");
+    }
+
+    pub fn check_node_errors() {
+        let baseline = PAGES.with_borrow(|p|p.len());
+        for fail_after in 0..3 {
+            let mut space = FirmwareSpace {
+                table: UatPageTable::new_with_ias(42,42).unwrap(),
+                regions: RBTree::new(), dirty_regions: RefCell::new(KVec::new()),
+                external: KVec::new(),
+            };
+            space.sync();
+            FAIL_NODE.set(Some(fail_after));
+            assert_eq!(space.alloc(0x40000,PAGE,pgtable::prot::PROT_FW_PRIV_RW),Err(ENOMEM));
+            assert_eq!(space.table.translate(0x40000).unwrap(),None);
+            assert!(space.regions.get(&0x40000).is_none());
+            assert!(space.dirty_regions.borrow().is_empty());
+            space.sync();
+            space.alloc(0x40000,PAGE,pgtable::prot::PROT_FW_PRIV_RW).unwrap();
+            space.sync();
+            assert_eq!(space.read_u32(0x40000).unwrap(),0);
+            drop(space);
+            assert_eq!(PAGES.with_borrow(|p|p.len()),baseline);
+        }
+        println!("PASS firmware index allocation failures: region and both child-table nodes, mapping/dirty-queue unwind, retry and complete teardown");
     }
 }
 fn reset() {
     CLEAN.set(0);
     INVALIDATE.set(0);
-    BARRIERS.set(0)
+    BARRIERS.set(0);
+    TREE_GETS.set(0);
 }
 fn check_tables() {
     use pgtable::{prot::PROT_GPU_SHARED_RW as RW, UatPageTable};
@@ -395,9 +529,9 @@ fn check_compute_storage() {
     for address in [g16_compute::SCRATCH, g16_compute::MARKER] {
         assert_eq!(vm.low.translate(address).unwrap(),None);
     }
-    FAIL_PUSH.set(Some(0));
+    FAIL_NODE.set(Some(0));
     assert_eq!(vm.prepare_compute(&mut p),Err(ENOMEM));
-    FAIL_PUSH.set(None);
+    FAIL_NODE.set(None);
     assert_eq!(vm.prepare_compute(&mut p),Err(ENOMEM), "failed reservation is not reused");
     assert_eq!(vm.low.leaf(0x10000058000).unwrap(), original);
     drop(vm);
@@ -406,13 +540,79 @@ fn check_compute_storage() {
 }
 
 fn main() {
+    check_client_index();
+    check_dirty_table_history();
     check_compute_storage();
     check_invalidations();
     check_cursors();
     check_tables();
     check_allocation_errors();
+    vm::check_node_errors();
     vm::check();
     assert!(PAGES.with_borrow(|p| p.is_empty()));
+}
+
+fn check_dirty_table_history() {
+    use pgtable::{prot::PROT_GPU_SHARED_RW as RW, UatPageTable};
+    let mut table = UatPageTable::new_with_ias(42,42).unwrap();
+    for i in 0..64u64 {
+        let va = (i + 1) << 25;
+        table.map_pages(va..va + PAGE as u64, 0x9000000, RW, false).unwrap();
+    }
+    table.sync();
+    reset();
+    table.sync();
+    assert_eq!((TREE_GETS.get(), CLEAN.get()), (0,0));
+    let va = 1 << 25;
+    table.unmap_pages(va..va + PAGE as u64).unwrap();
+    table.map_pages(va..va + PAGE as u64, 0x9100000, RW, false).unwrap();
+    reset();
+    table.sync();
+    assert_eq!((TREE_GETS.get(), CLEAN.get()), (1,PAGE / 64));
+    // First push records the invalidation, second queues the clean. Failing
+    // the latter must leave the PTE unchanged and allow the next edit to retry.
+    table.clear_invalidations();
+    FAIL_PUSH.set(Some(1));
+    assert_eq!(table.unmap_pages(va..va + PAGE as u64), Err(ENOMEM));
+    assert_eq!(table.translate(va).unwrap(),Some(0x9100000));
+    reset(); table.sync();
+    assert_eq!((TREE_GETS.get(), CLEAN.get()),(0,0));
+    table.unmap_pages(va..va + PAGE as u64).unwrap();
+    reset(); table.sync();
+    assert_eq!((TREE_GETS.get(), CLEAN.get()),(1,PAGE / 64));
+    println!("PASS dirty-table history: 64 leaves, clean sync zero lookups, repeated edits clean once, failed enqueue leaves PTE unchanged and retry publishes");
+}
+
+fn check_client_index() {
+    let baseline = PAGES.with_borrow(|p|p.len());
+    let base = 0x4000000u64;
+    let mut space = vm::AddressSpace::new().unwrap();
+    assert_eq!(space.alloc_tvb_blocks(base, 2),Ok(true));
+    for block in 0..2u64 {
+        let start = base + block * 0x28000;
+        for offset in (0..0x20000).step_by(PAGE) {
+            let va = start + offset as u64;
+            space.write_low(va + 17, &[0x9a]).unwrap();
+            let phys = space.low.translate(va).unwrap().unwrap();
+            assert_eq!(unsafe {Page::borrow_phys_unchecked(&phys)}.device_bytes()[17],0x9a);
+        }
+        assert_eq!(space.low.translate(start + 0x20000).unwrap(),None);
+        assert_eq!(space.write_low(start + 0x20000, &[1]),Err(EINVAL));
+    }
+    assert_eq!(space.alloc_tvb_blocks(base,1),Err(EEXIST));
+    drop(space);
+    assert_eq!(PAGES.with_borrow(|p|p.len()),baseline);
+    for fail_after in 0..16 {
+        let mut space = vm::AddressSpace::new().unwrap();
+        let roots_only = PAGES.with_borrow(|p|p.len());
+        FAIL_NODE.set(Some(fail_after));
+        assert_eq!(space.alloc_tvb_blocks(base,2),Ok(false));
+        assert_eq!(space.low.translate(base).unwrap(),None);
+        assert_eq!(PAGES.with_borrow(|p|p.len()),roots_only);
+        assert_eq!(space.alloc_tvb_blocks(base,2),Ok(true));
+    }
+    assert_eq!(PAGES.with_borrow(|p|p.len()),baseline);
+    println!("PASS client page index: TVB writes, unmapped guards, duplicate refusal, all 16 node allocation failures unwind before mapping and permit retry");
 }
 
 include!("pipeline.rs");

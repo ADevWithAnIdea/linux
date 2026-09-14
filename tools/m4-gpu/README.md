@@ -586,3 +586,29 @@ eight-queue destruction with work pending. Final memory, scheduling, batching,
 notification, render/compute wire and Rust formatting checks pass. These are
 focused correctness checks under the one-P-core hypervisor configuration,
 not throughput measurements or conformance qualification.
+
+## Indexed memory and pending cache cleans
+
+Firmware regions and client-owned scratch pages use kernel RB trees, so reads,
+writes and ownership lookup take logarithmic time in retained allocation count.
+Firmware-region and page-table clean queues contain only pending entries and
+deduplicate repeated writes. Clean synchronization does not traverse historical
+regions or tables. Dirty firmware regions retain per-page cleaning flags, and
+live writes retain their existing cache-line preservation and publication order.
+
+`check-memory.py` executes the changed methods with host page/cache and tree
+stand-ins. It checks out-of-order insertion, region bounds/gaps/adjacency,
+clean-sync lookup counts, re-dirtying after live writes, queued-region removal
+and VA reuse, allocation failures and ownership teardown. Real cache/TLB
+ordering is qualified separately on hardware.
+
+Build 124 / boot 086 / kernel #92 passes 64 queued computes, a 64-command mixed
+array with repeated partials, eight attachments and TVB growth/refusal, mapping
+while work is pending, and destruction with 32 commands pending on eight queues.
+The mixed caller retains the documented full CDM tail control. Output, fences
+and GPU timestamp checks pass; the final proxy responds. Source, build and
+test records are in the host repository at
+`docs/evidence/m4-kernel-20260914/indexed-memory/`.
+
+This change does not recycle Work or scratch allocations. Safe reuse remains
+open, including firmware Work storage which currently survives VM destruction.
