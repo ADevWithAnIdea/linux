@@ -29,6 +29,7 @@ thread_local! {
     static CLEAN: Cell<usize> = const { Cell::new(0) };
     static INVALIDATE: Cell<usize> = const { Cell::new(0) };
     static BARRIERS: Cell<usize> = const { Cell::new(0) };
+    static TLB: RefCell<Vec<(Option<u8>,u64,u64)>> = const { RefCell::new(Vec::new()) };
     static PUSHES: Cell<usize> = const { Cell::new(0) };
     static FAIL_PUSH: Cell<Option<usize>> = const { Cell::new(None) };
 }
@@ -143,7 +144,9 @@ mod mem {
     pub fn sync() {
         super::BARRIERS.set(super::BARRIERS.get() + 1)
     }
-    pub fn tlbi_all() {}
+    pub fn tlbi_range(asid: Option<u8>, start: u64, end: u64) {
+        super::TLB.with_borrow_mut(|v| v.push((asid,start,end)));
+    }
 }
 mod util {
     pub fn align(a: u64, b: u64) -> u64 {
@@ -371,19 +374,24 @@ fn check_forks() {
     let mut succeeded = false;
     for fail_after in 0..32 {
         FAIL_PUSH.set(Some(fail_after));
-        let copied = source.fork();
+        let copied = unsafe { source.fork() };
         FAIL_PUSH.set(None);
         match copied {
             Err(ENOMEM) => (),
             Err(error) => panic!("unexpected fork error {error}"),
             Ok(mut copy) => {
                 assert_ne!(copy.ttb(), source.ttb());
+                assert_eq!(PAGES.with_borrow(|p| p.len()), page_count + 1,
+                    "fork allocates only a root before private edits");
                 for &address in &addresses { assert_eq!(copy.leaf(address), source.leaf(address)); }
                 copy.unmap_pages(0x4000..0x8000).unwrap();
                 copy.map_pages(0x4000..0x8000, 0xa000000, RW, false).unwrap();
                 assert_eq!(source.translate(0x4000).unwrap(), Some(0x9000000));
-                source.unmap_pages((1 << 40)..(1 << 40) + PAGE as u64).unwrap();
-                assert_eq!(copy.translate(1 << 40).unwrap(), Some(0x9000000 + 3 * PAGE as u64));
+                // Unchanged branches share tables. Fresh parent bindings can
+                // appear in those branches while existing jobs keep stable VAs.
+                source.map_pages((1 << 40) + PAGE as u64..(1 << 40) + 2 * PAGE as u64,
+                                 0xb000000, RW, false).unwrap();
+                assert_eq!(copy.translate((1 << 40) + PAGE as u64).unwrap(), Some(0xb000000));
                 succeeded = true;
             }
         }
@@ -392,9 +400,11 @@ fn check_forks() {
         if succeeded { break; }
     }
     assert!(succeeded);
-    println!("PASS async tree forks: independent parents/leaves, 42-bit addresses, permission preservation, allocation-failure unwind and source lifetime");
+    println!("PASS async tree forks: shared unchanged branches, private edited leaves, 42-bit addresses, permission preservation, allocation-failure unwind and source lifetime");
 }
 fn main() {
+    check_invalidations();
+    check_private_branch_failures();
     check_cursors();
     check_forks();
     check_tables();
@@ -417,4 +427,43 @@ fn check_cursors() {
         assert!(!reached(0, capacity, capacity));
     }
     println!("PASS retirement cursors: every target in both rings, forward/backward windows, wrap and invalid cursors");
+}
+
+fn check_invalidations() {
+    use pgtable::{UatPageTable,prot::PROT_GPU_SHARED_RW as RW};
+    let mut table = UatPageTable::new_with_ias(42,42).unwrap();
+    table.map_pages(0x4000..0x8000,0x9000000,RW,false).unwrap();
+    table.map_pages(0x8000..0xc000,0x9004000,RW,false).unwrap();
+    table.map_pages(0x100000..0x104000,0x9008000,RW,false).unwrap();
+    table.sync(); TLB.with_borrow_mut(|v| v.clear());
+    table.invalidate(Some(9));
+    assert_eq!(TLB.with_borrow(|v| v.clone()),
+        vec![(Some(9),0x4000,0xc000),(Some(9),0x100000,0x104000)]);
+    table.clear_invalidations(); TLB.with_borrow_mut(|v| v.clear());
+    table.invalidate(None);
+    assert!(TLB.with_borrow(|v| v.is_empty()));
+    table.unmap_pages(0x8000..0xc000).unwrap(); table.sync(); table.invalidate(None);
+    assert_eq!(TLB.with_borrow(|v| v.clone()),vec![(None,0x8000,0xc000)]);
+    println!("PASS targeted TLB: adjacent edits merge, disjoint mappings stay separate, ASID/global VA scope, clean sync does not invalidate");
+}
+
+fn check_private_branch_failures() {
+    use pgtable::{UatPageTable,prot::PROT_GPU_SHARED_RW as RW};
+    let mut source=UatPageTable::new_with_ias(42,42).unwrap();
+    source.map_pages(0x4000..0x8000,0x9000000,RW,false).unwrap(); source.sync();
+    let before=PAGES.with_borrow(|p|p.len());
+    let mut failures=0;
+    for boundary in 0..24 {
+        let mut copy=unsafe { source.fork().unwrap() };
+        FAIL_PUSH.set(Some(boundary));
+        let result=copy.unmap_pages(0x4000..0x8000);
+        FAIL_PUSH.set(None);
+        if result==Err(ENOMEM) { failures+=1; }
+        else { result.unwrap(); assert_eq!(copy.translate(0x4000).unwrap(),None); }
+        assert_eq!(source.translate(0x4000).unwrap(),Some(0x9000000));
+        drop(copy);
+        assert_eq!(PAGES.with_borrow(|p|p.len()),before,"private branch failure leaked pages");
+    }
+    assert!(failures>=4);
+    println!("PASS private branch allocation failures: source unchanged and all partial copies reclaimed");
 }

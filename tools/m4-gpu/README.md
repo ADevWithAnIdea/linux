@@ -32,6 +32,10 @@ engines overlap, and later tiling stages run while earlier fragments execute.
 
 One publication/retirement worker admits work according to the selected engine's
 channel and workqueue space, available ASIDs, event slots and TVB scene leases.
+Up to 64 ready commands are prepared per publication batch. Commands sharing a
+firmware queue share a channel message carrying its final ring head. Each used
+engine/priority is kicked once per batch; completion stamps remain per Work.
+Transport credits count ring epochs rather than commands sharing an epoch.
 There is no fixed 16-command device window. A saturated queue waits while other
 ready queues continue. Each VM has 36 scene slots, released after both stages
 and event replies retire. Every render owns its tilemap, TPC, metadata, deflake,
@@ -44,7 +48,11 @@ RTKit notifications wake the worker; ready scheduler jobs and firmware faults
 also wake it. A generation counter closes the check/sleep race. The only runtime
 timer is the ten-second retirement-progress watchdog; notifications do not
 extend it. One-time bootstrap handshakes still use bounded polling. Mapping
-changes and context teardown drain completion fences before detaching roots.
+changes add fresh bindings without waiting for GPU completion. Unmapping waits
+only for submissions on the affected VM; context teardown still drains before
+detaching roots. Client mapping edits invalidate only changed VAs in bound
+ASIDs. Global firmware mapping edits invalidate their changed VAs across ASIDs.
+The M4 backend has no whole-GPU TLB invalidation, including bootstrap.
 
 Input syncobj fences remain scheduler dependencies on actual completion. The
 worker resolves UAPI VDM/CDM barrier indices independently: NONE permits
@@ -56,12 +64,17 @@ fences with independent fence contexts, so a later compute completion cannot
 incorrectly imply completion of an earlier render.
 
 Render and compute have separate UAT views of a VM's shared GEM backing. Each
-queued compute owns a fork of the page-table tree and a private resource-table
-snapshot at the caller's original DVA, plus private scratch and marker pages;
-live roots are never rebound. Those views
-remain owned until VM destruction. A driver-owned full CDM cache barrier followed
-by a link to the caller stream preserves dependent SSBO writes between back-to-back
-Works. The narrower 0x60000168 barrier was insufficient. The link was exercised
+queued compute owns a private root and copies only page-table branches it
+modifies; unchanged branches remain shared with the parent VM. The parent lock
+serializes CPU access and views are destroyed before parent tables. Each Work
+also owns a private resource-table snapshot at the caller's original DVA, plus
+private scratch and marker pages. Live roots are never rebound. Those views
+remain owned until VM destruction. Firmware Work storage is allocated and
+mapped in chunks of sixteen slots; every slot stays distinct and retained,
+including its notifier links and completion stamps. Render tails retain their
+separate shared mapping permissions. A driver-owned full CDM cache barrier
+followed by a link to the caller stream preserves dependent SSBO writes between
+back-to-back Works. The narrower 0x60000168 barrier was insufficient. The link was exercised
 with a caller CDM address above 2 TiB; caller BO bytes remain unchanged.
 
 TVB growth uses source-built lists and retained pages. Replies include the
@@ -513,3 +526,20 @@ compute in the pressure case finishes 1.048 seconds before the last render
 starts tiling. Host scheduling, memory, notification and wire checks also pass.
 Evidence and hashes are in the host repository at
 `docs/evidence/m4-kernel-20260913/concurrency/`.
+
+
+## Submission overhead qualification
+
+Build 108 / boot 073 / kernel #84 validates scoped VM mapping synchronization,
+VA/ASID TLB invalidation, shared unchanged compute page-table branches, mapped
+Work arenas and batched channel publication. A mixed 32-command SUBMIT uses
+three firmware messages and two kicks; 63 queued computes use one of each.
+The public-UAPI mapping probe returns fresh binds and another VM's unmap/remap
+while an input-gated submission remains pending, and waits when unmapping the
+affected VM. Exact-output render/compute batches, partial rendering with TVB
+growth/refusal, explicit dependencies, UAPI options, pending-work destruction,
+timestamps and GPU-produced local indirect compute pass. Host memory and
+batching tests cover allocation failure and ring wrap. This establishes
+correctness of the changes, not a throughput benchmark against M1/M2.
+Evidence is in the host tree under
+`docs/evidence/m4-kernel-20260913/submission-performance/`.
