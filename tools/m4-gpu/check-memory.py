@@ -55,10 +55,12 @@ def main():
     vm_code.append(block(vm, 'impl Drop for FirmwareSpace'))
     vm_code += [re.search(r'const IAS:[^;]+;', vm)[0], re.search(r'const OAS:[^;]+;', vm)[0],
                 '#[derive(Clone,Copy)]', block(vm, 'pub(crate) struct Roots {'),
+                '#[derive(Debug,PartialEq)]', block(vm, 'pub(crate) struct Scratch {'),
                 block(vm, 'pub(crate) struct AddressSpace {'), 'impl AddressSpace {']
     for name in ('new', 'roots', 'alloc_low', 'alloc_tvb_blocks', 'write_low',
-                 'init_compute_private', 'prepare_compute', 'sync'):
+                 'init_compute_private', 'prepare_compute', 'release_scratch', 'sync'):
         vm_code.append(block(vm, 'pub(crate) fn ' + name + '('))
+    vm_code.append(block(vm, 'fn lease_scratch('))
     vm_code.append('}')
     with tempfile.TemporaryDirectory(prefix='m4-memory-') as tmp:
         out = Path(tmp)

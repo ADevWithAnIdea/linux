@@ -83,6 +83,7 @@ impl<T> KVec<T> {
         Self(Vec::new())
     }
     fn reserve(&mut self, n: usize, _: u32) -> Result { self.0.reserve(n); Ok(()) }
+    fn remove(&mut self, index: usize) -> Result<T> { Ok(self.0.remove(index)) }
     fn push(&mut self, item: T, _: u32) -> Result {
         PUSHES.set(PUSHES.get() + 1);
         if let Some(left) = FAIL_PUSH.get() {
@@ -510,8 +511,9 @@ fn check_compute_storage() {
     let mut p = g16_compute::Parameters {cdm:0x1400000000, cdm_end:0x1400000040,
         sampler:0,sampler_count:0,scratch:0,marker:0,save_area:0};
     let mut physical = std::collections::BTreeSet::new();
+    let mut leases = Vec::new();
     for _ in 0..36 {
-        vm.prepare_compute(&mut p).unwrap();
+        leases.push(vm.prepare_compute(&mut p).unwrap());
         assert_eq!(vm.roots().low, roots.low);
         assert_eq!(vm.roots().high, roots.high);
         assert_eq!(p.marker, p.scratch + 0x20000);
@@ -534,6 +536,27 @@ fn check_compute_storage() {
     FAIL_NODE.set(None);
     assert_eq!(vm.prepare_compute(&mut p),Err(ENOMEM), "failed reservation is not reused");
     assert_eq!(vm.low.leaf(0x10000058000).unwrap(), original);
+    let retained = PAGES.with_borrow(|p| p.len());
+    for round in 0..10 {
+        // Release out of order to exercise adjacency/coalescing; every active
+        // lease remains distinct until its explicit retirement.
+        while !leases.is_empty() {
+            let index = leases.len() / 2;
+            vm.release_scratch(leases.remove(index)).unwrap();
+        }
+        for index in 0..36 {
+            leases.push(vm.prepare_compute(&mut p).unwrap());
+            assert_eq!(p.scratch, base + index * 0x24000);
+            let pa = vm.low.translate(p.marker).unwrap().unwrap();
+            let page = unsafe { Page::borrow_phys_unchecked(&pa) };
+            page.with_pointer_into_page(0, PAGE, |ptr| {
+                assert!(unsafe { std::slice::from_raw_parts(ptr,PAGE) }.iter().all(|b|*b==0));
+                unsafe { std::ptr::write_bytes(ptr, 0xa5, PAGE) };
+                Ok(())
+            }).unwrap();
+        }
+        assert_eq!(PAGES.with_borrow(|p|p.len()), retained, "reuse round {round}");
+    }
     drop(vm);
     assert_eq!(PAGES.with_borrow(|p|p.len()),baseline,"VM destruction releases all private backing");
     println!("PASS compute storage: 36 commands share roots, distinct zeroed backing, caller RO PTE unchanged, no fixed scratch aliases, exhaustion/failure retention and VM teardown");

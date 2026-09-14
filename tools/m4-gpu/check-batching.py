@@ -16,7 +16,10 @@ type Result<T=()> = std::result::Result<T,i32>;
 const GFP_KERNEL:u32=0; const EIO:i32=5; const ENODEV:i32=19; const ENOSPC:i32=28;
 macro_rules! dev_info { ($($t:tt)*) => {}; }
 struct KVec<T>(Vec<T>);
-impl<T> KVec<T> { fn push(&mut self,x:T,_:u32)->Result {self.0.push(x);Ok(())} }
+impl<T> KVec<T> {
+    fn push(&mut self,x:T,_:u32)->Result {self.0.push(x);Ok(())}
+    fn reserve(&mut self,n:usize,_:u32)->Result {self.0.reserve(n);Ok(())}
+}
 impl<T> Deref for KVec<T> {type Target=Vec<T>;fn deref(&self)->&Vec<T>{&self.0}}
 impl<T> DerefMut for KVec<T> {fn deref_mut(&mut self)->&mut Vec<T>{&mut self.0}}
 mod mem {pub fn sync() {}}
@@ -69,6 +72,7 @@ struct Bootstrap {
     publications:KVec<Publication>,_sgx:Io,_firmware_space:Option<Firmware>,
     _rtkit:RtKit,render_failed:bool,batch_works:usize,
     next_work_va:u64,work_arenas:[std::ops::Range<u64>;2],
+    free_work:[KVec<u64>;2],flights:Vec<()>,
 }
 '''
 code += "#[derive(Clone,Copy)]\n" + block(runtime, "struct Lane {")
@@ -79,6 +83,7 @@ fn backend()->Bootstrap {Bootstrap {
     publications:KVec(Vec::new()),_sgx:Io{tails:RefCell::new([0;12])},
     _firmware_space:Some(Firmware::default()),_rtkit:RtKit::default(),
     render_failed:false,batch_works:0,next_work_va:0x10000000,work_arenas:[0..0,0..0],
+    free_work:[KVec(Vec::new()),KVec(Vec::new())],flights:Vec::new(),
 }}
 fn lane(queue:u64,head:u32,new:bool)->Lane {Lane{queue,pointers:queue+0x4000,ring:queue+0x8000,head,new}}
 fn main() {
@@ -94,6 +99,16 @@ fn main() {
         if render {assert!(fw.allocations.contains(&(va+0x10000,0x8000,2)));}
     }}
     let fw=pool._firmware_space.as_ref().unwrap();assert_eq!(fw.allocations.len(),48);
+    for round in 0..100 {
+        for &(va,extent) in &slots {
+            pool.free_work[usize::from(extent==0x18000)].push(va,GFP_KERNEL).unwrap();
+        }
+        for _ in 0..16 {for render in [false,true] {
+            let va=pool.allocate_work(render).unwrap();
+            assert!(slots.contains(&(va,if render {0x18000}else{0x8000})));
+        }}
+        assert_eq!(pool._firmware_space.as_ref().unwrap().allocations.len(),48,"round {round}");
+    }
     let before=pool.next_work_va;
     pool._firmware_space.as_mut().unwrap().fail_alloc=Some(51);
     assert_eq!(pool.allocate_work(false),Err(ENOSPC));assert!(pool.work_arenas[0].is_empty());

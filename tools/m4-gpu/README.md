@@ -34,7 +34,8 @@ One publication/retirement worker admits work according to the selected engine's
 channel and workqueue space, available ASIDs, event slots and TVB scene leases.
 Up to 64 ready commands are prepared per publication batch. Commands sharing a
 firmware queue share a channel message carrying its final ring head. Each used
-engine/priority is kicked once per batch; completion stamps remain per Work.
+engine/priority is kicked once per batch. Dependency stamps belong to persistent
+queue lanes; driver stamps independently retire each Work allocation.
 Transport credits count ring epochs rather than commands sharing an epoch.
 There is no fixed 16-command device window. A saturated queue waits while other
 ready queues continue. Each VM has 36 scene slots, released after both stages
@@ -43,7 +44,10 @@ status and auxiliary storage; concurrent renders do not overwrite that scratch.
 Private-memory pools also have distinct hardware FList slots: reusing slot zero
 for both engines caused render/compute execution stalls.
 
-Unique completion stamps and advancing ring cursors determine retirement.
+Driver stamps, notifier removal and advancing ring cursors determine retirement.
+The notifier pass consumes embedded JobMeta and cleans/invalidates its firmware
+cache lines before writing the driver stamp. The earlier firmware stamp permits
+GPU dependencies to advance but is insufficient to reuse storage.
 RTKit notifications wake the worker; ready scheduler jobs and firmware faults
 also wake it. A generation counter closes the check/sleep race. The only runtime
 timer is the ten-second retirement-progress watchdog; notifications do not
@@ -66,14 +70,17 @@ incorrectly imply completion of an earlier render.
 
 Render and compute have separate persistent UAT roots of a VM's shared GEM
 backing. Compute commands share the compute root and its ASID. Each command
-allocates fresh zeroed scratch (128 KiB) and a marker (16 KiB) at distinct VAs
-in the VM's reserved kernel aperture. Backing remains owned until VM destruction;
+leases zeroed scratch (128 KiB) and a marker (16 KiB) at distinct VAs
+in the VM's reserved kernel aperture. Retired ranges coalesce and are reused
+without editing PTEs. Backing remains owned until VM destruction;
 failed allocations consume their reservation without replacing earlier mappings.
 Firmware save storage occupies the zeroed upper half of each Work's GPU alias
 (+0x2000), independently of caller shader resources. There is no CPU CDM parser,
 resource-page copy, PTE overlay or per-command page-table fork. Firmware Work
-storage is allocated and mapped in chunks of sixteen slots; every slot stays distinct and retained,
-including its notifier links and completion stamps. Render tails retain their
+storage is allocated and mapped in chunks of sixteen slots, then reused after
+its driver stamps, notifier removal and transport have retired. Notifier counts
+cover exactly the Work's one compute or two render stages. Queue-owned dependency
+stamps remain monotonic when Work storage changes owners. Render tails retain their
 separate shared mapping permissions. A driver-owned full CDM cache barrier
 followed by a link to the caller stream preserves dependent SSBO writes between
 back-to-back computes. The narrower 0x60000168 barrier was insufficient. This
