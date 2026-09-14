@@ -32,10 +32,13 @@ to completion: the preempting profile lost updates in the multi-queue probes.
 One publication/retirement worker fills a
 16-command firmware window without waiting for each command to finish. Firmware
 barriers preserve public-queue command order and protect shared render scratch;
-unique stamps and advancing ring cursors determine completion. The worker polls
-retirement, sleeping 1 ms when there is no progress. Its watchdog detects ten
-seconds without retirement progress. Mapping changes and context teardown drain
-actual completion fences before detaching roots.
+unique stamps and advancing ring cursors determine completion. RTKit firmware
+ring notifications wake the worker to service events and retire work. Ready
+scheduler jobs and firmware faults also wake it. A generation counter closes
+the race between checking progress and sleeping. The only runtime timer is the
+ten-second retirement-progress watchdog; notifications do not extend it.
+One-time bootstrap handshakes still use bounded polling. Mapping changes and
+context teardown drain actual completion fences before detaching roots.
 
 Input syncobj fences remain scheduler dependencies on actual completion; they
 are not translated into firmware waits. This also protects CPU reads of
@@ -57,9 +60,9 @@ with a caller CDM address above 2 TiB; caller BO bytes remain unchanged.
 
 TVB growth uses source-built lists and retained pages. Replies include the
 request's subpipe and halt counter, including requests for queued work. Firmware
-timestamp microcommands write private per-Work slots at 24 MHz; the worker converts
-them to nanoseconds and copies them into bound timestamp BOs before signaling
-completion. GET_TIME uses the architectural counter and its own frequency.
+timestamp microcommands write nanoseconds directly into bound timestamp BOs
+through the validated firmware aperture. Completion fences signal after the
+firmware retires those writes. GET_TIME uses the architectural counter and its own frequency.
 VM_DESTROY removes the public handle while existing queues retain the VM;
 its final queue releases the page-table trees and pinned backing.
 
@@ -406,6 +409,59 @@ Two formerly global fields needed queue-specific values: the tiling Work's
 fragment event used for partial restart, and consecutive stamp sequences used
 by the firmware dependency graph. Compute preemption remains disabled using
 the same profile overrides as M1/M2; the preempting profile lost data even with
-disjoint client buffers and private per-Work scratch. Polling retirement, the
-global admission window and existing execution barriers remain as described
-above. This is focused bring-up validation, not extensive stress qualification.
+disjoint client buffers and private per-Work scratch. That qualification used
+polling retirement. The global admission window and existing execution barriers
+remain as described above. This is focused bring-up validation, not extensive
+stress qualification.
+
+## Firmware event wakeups
+
+RTKit's threaded receive callback handles endpoint 0x20, message
+0x0042000000000000 by advancing a condition-variable generation. The worker
+samples that generation before inspecting jobs and firmware. Its wait checks
+the same generation under the notification mutex, so a doorbell arriving
+before sleep remains visible. Ready scheduler jobs and firmware faults use the
+same wakeup path without acquiring the engine or firmware locks. Completion
+events may coalesce: firmware stamps and ring consumers still determine when
+timestamps, fences and context leases can retire.
+
+The worker sleeps until a notification or its remaining retirement-progress
+deadline. A watchdog expiry fails outstanding work and quarantines mappings;
+it is never used to make successful completion progress. Unrelated firmware
+traffic cannot restart the watchdog. The 16-command window and existing
+execution ordering remain.
+
+Removing the polling delay also exposed a general-barrier encoding omission.
+Explicit dependencies now use internal_barrier_type=1 at G16 offset 0x30, as
+M1/M2 does for queue dependencies. The fixed TA->fragment prelude retains zero.
+The M4 firmware DAG checker skips dynamic stamp checks for a zero type; short
+mixed batches without KTrace could consequently strand a compute->TA wait.
+
+Public render and compute timestamps use the explicit user-timestamp
+destinations in retained BO mappings. The initialization header advertises
+their 64 MiB aperture at offset 0x28; the firmware rejects destinations outside
+that interval. G16 Timestamp's user-pointer field is at microcommand offset
+0x24. Firmware converts its 24 MHz ticks to nanoseconds before writing those
+destinations, so the public frequency remains 1 GHz. Internal profiling storage
+is separate and no CPU timestamp copy or conversion is needed.
+
+`tools/m4-gpu/check-notify.py` executes the actual notification and general
+barrier methods with host synchronization stand-ins. It checks notification
+before sleep, 1,000 concurrent sleep/notify races, spurious wakeups, watchdog
+expiry, sticky crash notification, generation wrap and the barrier encoding.
+It does not emulate RTKit or GPU execution; those require hardware checks.
+
+Build 074 / kernel #59, boot 045 / artifacts 045 qualifies this path with
+KTrace disabled. Eight-queue compute (1,761 checks), eight-queue partial renders
+(942), four concurrent Mesa clients (443 each), mixed R/C/R/C (1,210), public
+UAPI options (1,250), and destruction with 32 submissions pending (1,893) pass.
+Delayed input fences, exact rendering, GPU-produced local-indirect geometry
+(590,257) and native render/compute timestamps also pass. The pipeline caller
+now rejects zero timestamps, in addition to checking per-queue order.
+
+The build is warning-free; notification, memory, wire and formatting checks
+pass. The final proxy NOP responds and Linux is paused at the hypervisor prompt.
+Raw passing and failed-control logs, artifact hashes and the source patch are
+in the host repository's `docs/evidence/m4-kernel-20260913/firmware-events/`.
+One-time bootstrap waits still use bounded polling. No Mesa source changes or
+extensive stress/conformance testing were needed for this qualification.
