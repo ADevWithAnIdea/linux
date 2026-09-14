@@ -90,27 +90,28 @@ fn main() {
     let mut pool=backend();let mut slots=Vec::new();
     for i in 0..16 {for render in [false,true] {
         let va=pool.allocate_work(render).unwrap();
-        let extent=if render {0x18000}else{0x8000};
+        let extent=if render {0x1c000}else{0x8000};
         assert!(!slots.iter().any(|&(old,len)|va<old+len && old<va+extent));
         slots.push((va,extent));
         let fw=pool._firmware_space.as_ref().unwrap();
         assert_eq!(fw.syncs,if i==0 && !render {1}else{2});
         assert!(fw.allocations.contains(&(va,if render {0x10000}else{0x4000},1)));
-        if render {assert!(fw.allocations.contains(&(va+0x10000,0x8000,2)));}
+        if render {assert!(fw.allocations.contains(&(va+0x10000,0xc000,2)));}
+        else {assert!(fw.allocations.contains(&(va+0x4000,0x4000,2)));}
     }}
-    let fw=pool._firmware_space.as_ref().unwrap();assert_eq!(fw.allocations.len(),48);
+    let fw=pool._firmware_space.as_ref().unwrap();assert_eq!(fw.allocations.len(),64);
     for round in 0..100 {
         for &(va,extent) in &slots {
-            pool.free_work[usize::from(extent==0x18000)].push(va,GFP_KERNEL).unwrap();
+            pool.free_work[usize::from(extent==0x1c000)].push(va,GFP_KERNEL).unwrap();
         }
         for _ in 0..16 {for render in [false,true] {
             let va=pool.allocate_work(render).unwrap();
-            assert!(slots.contains(&(va,if render {0x18000}else{0x8000})));
+            assert!(slots.contains(&(va,if render {0x1c000}else{0x8000})));
         }}
-        assert_eq!(pool._firmware_space.as_ref().unwrap().allocations.len(),48,"round {round}");
+        assert_eq!(pool._firmware_space.as_ref().unwrap().allocations.len(),64,"round {round}");
     }
     let before=pool.next_work_va;
-    pool._firmware_space.as_mut().unwrap().fail_alloc=Some(51);
+    pool._firmware_space.as_mut().unwrap().fail_alloc=Some(67);
     assert_eq!(pool.allocate_work(false),Err(ENOSPC));assert!(pool.work_arenas[0].is_empty());
     assert!(pool.next_work_va>before);
     pool._firmware_space.as_mut().unwrap().fail_alloc=None;

@@ -25,10 +25,12 @@ shared firmware transport channel for each engine. Active queues lease distinct
 event slots; idle queues release them after retirement. Pending submissions
 retain their queue state after public handle destruction. Firmware allocations,
 including retired queue storage, remain device-owned until reboot.
-Each engine runs its active Work to completion. Preempting profiles lost compute
-updates and render output on the M4, so priority chooses a firmware channel but
-does not interrupt already executing work. Independent render and compute
-engines overlap, and later tiling stages run while earlier fragments execute.
+TA/3D queues use native render scheduling, with public low/medium mapped to
+native classes 3/2. Firmware suspension/resume preserves independent render
+outputs under an explicit native interruption control. Ordinary low/medium
+competition has not demonstrated prompt preemption; no latency guarantee is
+claimed. Compute keeps the M1/M2 preemption disable. Independent render and
+compute engines overlap, and later tiling runs while earlier fragments execute.
 
 One publication/retirement worker admits work according to the selected engine's
 channel and workqueue space, available ASIDs, event slots and TVB scene leases.
@@ -47,7 +49,10 @@ for both engines caused render/compute execution stalls.
 Driver stamps, notifier removal and advancing ring cursors determine retirement.
 The notifier pass consumes embedded JobMeta and cleans/invalidates its firmware
 cache lines before writing the driver stamp. The earlier firmware stamp permits
-GPU dependencies to advance but is insufficient to reuse storage.
+GPU dependencies to advance but is insufficient to reuse storage. Per-Work
+driver stamps live in firmware-uncached shared pages, separate from Work and
+scratch. Firmware stores them then DSBs before sending the completion IRQ;
+a cached stamp can remain invisible to Linux after that IRQ.
 RTKit notifications wake the worker; ready scheduler jobs and firmware faults
 also wake it. A generation counter closes the check/sleep race. The only runtime
 timer is the ten-second retirement-progress watchdog; notifications do not
@@ -525,8 +530,8 @@ once, without enabling KTrace or logging every publication. `fw_trace=1`
 retains the previous KTrace/publication diagnostics. Normal operation uses zero.
 The earlier 16-command window and shared-render-scratch restrictions described
 in the historical qualification sections above are superseded by this change.
-Engine preemption remains disabled; cross-engine overlap and successive tiling/
-fragment execution do not require it. Firmware timestamps establish overlapping
+That build disabled engine preemption. Native render scheduling is now enabled;
+cross-engine overlap and successive tiling/fragment execution do not require it. Firmware timestamps establish overlapping
 stage intervals, not a measurement of simultaneous instruction issue on USCs.
 
 Build 102 / kernel #80 / boot 070 passes all the calls above, sixteen partial
@@ -570,9 +575,9 @@ observe backpressure and batches. This diagnostic does not gate admission.
 
 The source contract and hardware records are in the host tree's
 `docs/g16g-firmware-dependencies.md` and
-`docs/evidence/m4-kernel-20260914/firmware-dependencies/`. Render preemption remains
-unqualified; the existing execution profile still runs active engine work to
-completion.
+`docs/evidence/m4-kernel-20260914/firmware-dependencies/`. That build retained
+the run-to-completion profile; the later render-preemption qualification below
+supersedes that policy.
 
 The 64-command mixed dataflow caller exposed Apple9 Mesa's narrow compute tail
 (`0x60000160`). Copying its stream alone still returns stale SSBO data despite
@@ -617,5 +622,58 @@ and GPU timestamp checks pass; the final proxy responds. Source, build and
 test records are in the host repository at
 `docs/evidence/m4-kernel-20260914/indexed-memory/`.
 
-This change does not recycle Work or scratch allocations. Safe reuse remains
-open, including firmware Work storage which currently survives VM destruction.
+The indexed-memory change was followed by Work/scratch reuse in f89ed20a24e3.
+It recycles suballocations after notifier/driver-stamp retirement while retaining
+backing, as described above. Queue-creation metadata remains device-owned.
+
+
+## Render scheduling and browser qualification (2026-09-14)
+
+Native TA/3D queue profiles are enabled. The shim also fixes the fragment-event
+field used by TA restart and supplies the firmware timestamp aperture. Rust
+already had those fields. Public low/medium now select native 3/2 in both.
+Compute retains the M1/M2 non-preemptible override.
+
+The new caller generates independent Mesa screens, DRM files, VMs and float
+render targets, retains their source graphs through real fences, and verifies
+every pixel after additive replay. Shim firmware traces show the low Work
+starting twice around a short render with the native priority-type-5
+interruption control. Kernel build 131 reproduces exact output and nested GPU
+intervals (2,097,646 checks); its KTrace is empty, so no independent kernel
+restart-trace claim is made. The temporary forced-profile override is removed.
+Ordinary production low/medium preserve exact output but do not finish the
+short render early in this probe. The branch enables native scheduling without
+claiming prompt preemption from those ordinary profiles.
+
+Chromium exposed cached per-Work driver stamps: the CPU received completion
+IRQs but could read an old stamp until an unrelated notification 300..360ms
+later. The fix assigns a separate shared uncached completion page to each
+leased Work. No polling fallback or weakened reclamation boundary is used.
+
+Build 136 / boot 094 / kernel #100 passes the offline Chromium 152 WebGL2 city:
+225 textured instanced cubes, depth, MSAA, 800x600, 45 seconds with 10 seconds of
+warmup. It produces 2,697 frames at 60.014 fps, 16.7 ms median and 16.8 ms p95 frame
+intervals. Readback median is 11.5 ms, versus roughly 300..670 ms before the fix.
+Process-tree PSS peaks at 622.36 MiB and falls 22.45 MiB in steady state;
+system used memory falls 20.73 MiB. Hardware identity, changing detailed image
+hashes, GL errors and context loss are checked. This is the one-P-core m1n1
+hypervisor configuration, not a bare-metal throughput or conformance claim.
+
+The browser uses the established Mesa ecef89f tree and its preexisting local
+integration changes. UI compositing/rasterization are disabled; WebGL itself
+uses the M4. Default UI compositing hits that Mesa's index-address assertion.
+Niklas's newer 5742ecc tree fixes the index allocation issue but instead fails
+a NIR divergence assertion before WebGL starts. Mesa source was not changed.
+
+The same final kernel passes 64 batched computes (66,487 checks), ordered
+render/compute overlap (66,373), three 64-command mixed arrays with eight
+attachments, repeated partials and TVB growth/refusal, destruction with 32
+commands across eight queues (1,893), and native render policy (2,097,647).
+The mixed caller retains the documented full post-dispatch CDM cache boundary.
+Host memory, batching and scheduling checks also pass.
+
+The host repository contains reproducible tools in tests/hardware/ and
+`tools/m4_kernel_browser_pack.py`; set M4_BROWSER_RUNTIME to that packer's
+archive when using build.sh. Boot networking includes loopback/Unix sockets
+and /dev/shm for Chromium. Source/evidence records are under
+`docs/evidence/m4-kernel-20260914/{render-preemption,chromium}/` in that tree.

@@ -44,7 +44,7 @@ aarch64-linux-gnu-gcc -O2 -Wall -Wextra -Werror -shared -fPIC \
     printf 'file /init %s/tools/m4-gpu/init 0755 0 0\n' "$source_dir"
     for applet in sh mount umount mkdir hostname uname setsid cttyhack cat dmesg \
                   ls readlink hexdump sleep echo ps head tail wc grep sed awk \
-                  free uptime stat sync reboot poweroff stty; do
+                  free uptime stat sync reboot poweroff stty ifconfig; do
         printf 'slink /bin/%s busybox 0777 0 0\n' "$applet"
     done
 } > "$build_dir/initramfs.list"
@@ -52,6 +52,10 @@ mesa_runtime=${M4_MESA_RUNTIME:-$build_dir/mesa-runtime.tar.gz}
 if [ -f "$mesa_runtime" ]; then
     python3 "$source_dir/tools/m4-gpu/mesa-initramfs.py" "$mesa_runtime" \
         "$build_dir/mesa-runtime" >> "$build_dir/initramfs.list"
+fi
+if [ -n "${M4_BROWSER_RUNTIME:-}" ]; then
+    python3 "$source_dir/tools/m4-gpu/mesa-initramfs.py" "$M4_BROWSER_RUNTIME" \
+        "$build_dir/browser-runtime" >> "$build_dir/initramfs.list"
 fi
 "$build_dir/usr/gen_init_cpio" -t 0 "$build_dir/initramfs.list" |
     gzip -n > "$build_dir/initramfs.cpio.gz"
