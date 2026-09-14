@@ -20,9 +20,6 @@ def main():
     code = Path(__file__).with_name("notify-check.rs").read_text()
     code += "\n" + block(source, "struct State {")
     code += "\nimpl Notifications {\n" + methods + "\n}\n"
-    runtime = (root / "drivers/gpu/drm/asahi/g16_runtime.rs").read_text()
-    code += "\n" + block(runtime, "pub(crate) struct Stamp {")
-    code += "\n" + block(runtime, "impl Stamp {")
     with tempfile.TemporaryDirectory(prefix="m4-notify-") as tmp:
         out = Path(tmp)
         (out / "test.rs").write_text(code)

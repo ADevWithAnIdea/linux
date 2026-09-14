@@ -25,29 +25,35 @@ shared firmware transport channel for each engine. Active queues lease distinct
 event slots; idle queues release them after retirement. Pending submissions
 retain their queue state after public handle destruction. Firmware allocations,
 including retired queue storage, remain device-owned until reboot.
-Compute uses the M1/M2 queue profile that disables compute preemption. Independent
-queues can be selected out of submission order, but an active compute Work runs
-to completion: the preempting profile lost updates in the multi-queue probes.
+Each engine runs its active Work to completion. Preempting profiles lost compute
+updates and render output on the M4, so priority chooses a firmware channel but
+does not interrupt already executing work. Independent render and compute
+engines overlap, and later tiling stages run while earlier fragments execute.
 
-One publication/retirement worker fills a
-16-command firmware window without waiting for each command to finish. Firmware
-barriers preserve public-queue command order and protect shared render scratch;
-unique stamps and advancing ring cursors determine completion. RTKit firmware
-ring notifications wake the worker to service events and retire work. Ready
-scheduler jobs and firmware faults also wake it. A generation counter closes
-the race between checking progress and sleeping. The only runtime timer is the
-ten-second retirement-progress watchdog; notifications do not extend it.
-One-time bootstrap handshakes still use bounded polling. Mapping changes and
-context teardown drain actual completion fences before detaching roots.
+One publication/retirement worker admits work according to the selected engine's
+channel and workqueue space, available ASIDs, event slots and TVB scene leases.
+There is no fixed 16-command device window. A saturated queue waits while other
+ready queues continue. Each VM has 36 scene slots, released after both stages
+and event replies retire. Every render owns its tilemap, TPC, metadata, deflake,
+status and auxiliary storage; concurrent renders do not overwrite that scratch.
+Private-memory pools also have distinct hardware FList slots: reusing slot zero
+for both engines caused render/compute execution stalls.
 
-Input syncobj fences remain scheduler dependencies on actual completion; they
-are not translated into firmware waits. This also protects CPU reads of
-GPU-produced CDM/resource metadata. A batch's declared compute dependencies can
-therefore require a host wait; independent public queues can still publish.
-The hardware window is real, but it does not imply arbitrary parallel execution:
-commands on a public queue stay ordered and render scratch is shared. Output
-syncobjs use the actual completion fence so DRM cannot downgrade their dependencies
-to merely reaching the scheduler's run callback.
+Unique completion stamps and advancing ring cursors determine retirement.
+RTKit notifications wake the worker; ready scheduler jobs and firmware faults
+also wake it. A generation counter closes the check/sleep race. The only runtime
+timer is the ten-second retirement-progress watchdog; notifications do not
+extend it. One-time bootstrap handshakes still use bounded polling. Mapping
+changes and context teardown drain completion fences before detaching roots.
+
+Input syncobj fences remain scheduler dependencies on actual completion. The
+worker resolves UAPI VDM/CDM barrier indices independently: NONE permits
+independent work, zero refers to the preceding submission, and N selects the
+Nth preceding command on that engine in the current batch. Declared dependencies
+wait for firmware completion events before publication, which also protects CPU
+reads of GPU-produced CDM/resource metadata. Output syncobjs use actual completion
+fences with independent fence contexts, so a later compute completion cannot
+incorrectly imply completion of an earlier render.
 
 Render and compute have separate UAT views of a VM's shared GEM backing. Each
 queued compute owns a fork of the page-table tree and a private resource-table
@@ -465,3 +471,45 @@ Raw passing and failed-control logs, artifact hashes and the source patch are
 in the host repository's `docs/evidence/m4-kernel-20260913/firmware-events/`.
 One-time bootstrap waits still use bounded polling. No Mesa source changes or
 extensive stress/conformance testing were needed for this qualification.
+
+
+## Render pipelining and queue backpressure
+
+The host caller `tests/hardware/g16g_concurrency.c` captures source-built Mesa
+work while retaining its resources, then submits it through the public UAPI.
+It checks every rendered float and compute word, completion fences, timestamp
+guards, stage order and overlapping stage intervals. `render` exercises tiling
+of successive frames; `mixed` and `queues` interleave render/compute on one or
+two public queues. `barriers` orders both engines, and `render-deps` orders only
+framebuffer renders while compute remains independent. `pressure` submits a long
+render backlog followed by compute and requires compute to bypass that backlog.
+Compile/package it like `async-pipeline-gl` above, as `concurrency-gl`.
+
+```sh
+mount -t debugfs debugfs /sys/kernel/debug
+/opt/mesa/run /opt/mesa/bin/concurrency-gl render 64 2000000
+/opt/mesa/run /opt/mesa/bin/concurrency-gl mixed 32 200000
+/opt/mesa/run /opt/mesa/bin/concurrency-gl queues 8 200000
+/opt/mesa/run /opt/mesa/bin/concurrency-gl barriers 8 200000
+/opt/mesa/run /opt/mesa/bin/concurrency-gl render-deps 8 200000
+/opt/mesa/run /opt/mesa/bin/concurrency-gl pressure 64 2000000
+/opt/mesa/run /opt/mesa/bin/concurrency-gl compute 128 2000000
+```
+
+Boot argument `asahi_m4.fw_trace=2` reports each saturated admission resource
+once, without enabling KTrace or logging every publication. `fw_trace=1`
+retains the previous KTrace/publication diagnostics. Normal operation uses zero.
+The earlier 16-command window and shared-render-scratch restrictions described
+in the historical qualification sections above are superseded by this change.
+Engine preemption remains disabled; cross-engine overlap and successive tiling/
+fragment execution do not require it. Firmware timestamps establish overlapping
+stage intervals, not a measurement of simultaneous instruction issue on USCs.
+
+Build 102 / kernel #80 / boot 070 passes all the calls above, sixteen partial
+renders on eight queues, mixed command arrays, UAPI options, delayed fences
+and timestamps, local indirect compute, and teardown with 32 commands pending.
+Admission actually reaches 36 occupied scenes and 63 occupied ASIDs. The final
+compute in the pressure case finishes 1.048 seconds before the last render
+starts tiling. Host scheduling, memory, notification and wire checks also pass.
+Evidence and hashes are in the host repository at
+`docs/evidence/m4-kernel-20260913/concurrency/`.

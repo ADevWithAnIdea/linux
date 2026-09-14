@@ -89,32 +89,6 @@ fn wait_until_sleeping(n: &Notifications) {
     }
 }
 fn main() {
-    let barrier = Stamp {
-        address: 0xfffffc2200012340,
-        value: 0x500,
-        event: 34,
-    }
-    .barrier(0xf00, 0x1234);
-    let word = |offset| u32::from_le_bytes(barrier[offset..offset + 4].try_into().unwrap());
-    assert_eq!(word(0), 4);
-    for offset in [4, 12] {
-        assert_eq!(
-            u64::from_le_bytes(barrier[offset..offset + 8].try_into().unwrap()),
-            0xfffffc2200012340
-        );
-    }
-    for (offset, value) in [
-        (0x14, 0x500),
-        (0x20, 34),
-        (0x24, 0xf00),
-        (0x28, 0x1234),
-        (0x2c, 0),
-        (0x30, 1),
-    ] {
-        assert_eq!(word(offset), value);
-    }
-    println!("NOTIFY_PASS general dependency uses dynamic DAG barrier type");
-
     let n = notifications();
     let generation = n.snapshot().unwrap();
     n.notify(false);
