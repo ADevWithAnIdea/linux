@@ -2199,6 +2199,10 @@ static bool vma_can_userfault(struct vm_area_struct *vma, vm_flags_t vm_flags,
 {
 	const struct vm_uffd_ops *ops = vma_uffd_ops(vma);
 
+	/* Page-cache and hugetlb folios do not support 4KB UFFD slicing. */
+	if (vma_is_p3s_4k(vma) && !vma_is_anonymous(vma))
+		return false;
+
 	if (vma->vm_flags & (VM_DROPPABLE | VM_SHADOW_STACK))
 		return false;
 
