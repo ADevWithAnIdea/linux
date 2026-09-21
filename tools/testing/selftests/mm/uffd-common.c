@@ -39,13 +39,17 @@ static int uffd_mem_fd_create(off_t mem_size, bool hugetlb)
 		memfd_flags = MFD_HUGETLB;
 	mem_fd = memfd_create("uffd-test", memfd_flags);
 	if (mem_fd < 0)
-		err("memfd_create");
-	if (ftruncate(mem_fd, mem_size))
-		err("ftruncate");
+		return -errno;
+	if (ftruncate(mem_fd, mem_size)) {
+		close(mem_fd);
+		return -errno;
+	}
 	if (fallocate(mem_fd,
 		      FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 0,
-		      mem_size))
-		err("fallocate");
+		      mem_size)) {
+		close(mem_fd);
+		return -errno;
+	}
 
 	return mem_fd;
 }
@@ -91,11 +95,17 @@ static int hugetlb_allocate_area(uffd_global_test_opts_t *gopts, void **alloc_ar
 	char **alloc_area_alias;
 	int mem_fd = uffd_mem_fd_create(size * 2, true);
 
+	if (mem_fd < 0) {
+		*alloc_area = NULL;
+		return mem_fd;
+	}
+
 	*alloc_area = mmap(NULL, size, PROT_READ | PROT_WRITE,
 			   (gopts->map_shared ? MAP_SHARED : MAP_PRIVATE) |
 			   (is_src ? 0 : MAP_NORESERVE),
 			   mem_fd, offset);
 	if (*alloc_area == MAP_FAILED) {
+		close(mem_fd);
 		*alloc_area = NULL;
 		return -errno;
 	}
@@ -103,8 +113,12 @@ static int hugetlb_allocate_area(uffd_global_test_opts_t *gopts, void **alloc_ar
 	if (gopts->map_shared) {
 		area_alias = mmap(NULL, size, PROT_READ | PROT_WRITE,
 				  MAP_SHARED, mem_fd, offset);
-		if (area_alias == MAP_FAILED)
+		if (area_alias == MAP_FAILED) {
+			munmap(*alloc_area, size);
+			close(mem_fd);
+			*alloc_area = NULL;
 			return -errno;
+		}
 	}
 
 	if (is_src) {
@@ -143,7 +157,14 @@ static int shmem_allocate_area(uffd_global_test_opts_t *gopts, void **alloc_area
 	int mem_fd = uffd_mem_fd_create(bytes * 2, false);
 	size_t region_size = bytes * 2 + hpage_size;
 
-	void *reserve = mmap(NULL, region_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS,
+	void *reserve;
+
+	if (mem_fd < 0) {
+		*alloc_area = NULL;
+		return mem_fd;
+	}
+
+	reserve = mmap(NULL, region_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS,
 			-1, 0);
 	if (reserve == MAP_FAILED) {
 		close(mem_fd);
