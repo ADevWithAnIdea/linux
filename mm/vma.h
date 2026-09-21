@@ -242,8 +242,23 @@ static inline pgoff_t vmg_pages(const struct vma_merge_struct *vmg)
 {
 	const unsigned long size = vmg->end - vmg->start;
 
-	return size >> PAGE_SHIFT;
+	return size >> mm_pte_shift(vmg->mm);
 }
+
+#ifdef CONFIG_ARM64_PER_PROCESS_PAGE_SIZE
+bool vmg_can_merge_offsets(struct vma_merge_struct *vmg, bool merge_next);
+#else
+static inline bool vmg_can_merge_offsets(struct vma_merge_struct *vmg, bool merge_next)
+{
+	if (merge_next)
+		return vmg->next->vm_pgoff == vmg->pgoff + PHYS_PFN(vmg->end - vmg->start);
+
+	if (!vmg->prev)
+		return false;
+
+	return vmg->pgoff == vmg->prev->vm_pgoff + PHYS_PFN(vmg->start - vmg->prev->vm_start);
+}
+#endif
 
 static inline pgoff_t vmg_start_pgoff(const struct vma_merge_struct *vmg)
 {
