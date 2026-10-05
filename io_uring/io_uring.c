@@ -44,6 +44,7 @@
 #include <linux/syscalls.h>
 #include <linux/refcount.h>
 #include <linux/bits.h>
+#include <linux/p3s/mm.h>
 
 #include <linux/sched/signal.h>
 #include <linux/fs.h>
@@ -2594,6 +2595,9 @@ SYSCALL_DEFINE6(io_uring_enter, unsigned int, fd, u32, to_submit,
 	struct file *file;
 	long ret;
 
+	if (mm_is_p3s_4k(current->mm))
+		return -EOPNOTSUPP;
+
 	if (unlikely(flags & ~IORING_ENTER_FLAGS))
 		return -EINVAL;
 
@@ -3142,6 +3146,9 @@ SYSCALL_DEFINE2(io_uring_setup, u32, entries,
 		struct io_uring_params __user *, params)
 {
 	int ret;
+
+	if (mm_is_p3s_4k(current->mm))
+		return -EOPNOTSUPP;
 
 	ret = io_uring_allowed();
 	if (ret)
