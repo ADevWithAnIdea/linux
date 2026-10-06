@@ -7,13 +7,16 @@
 #include <asm/memory.h>
 
 /*
- * ARM64 Unified 3-Level Translation Geometry:
+ * P3S Translation Geometry (16KB host, 47-bit native VA):
  *
  * 16KB Native (47-bit VA):
  *   PGD (L1, 11b) ---> PMD (L2, 11b) ---> PTE (L3, 11b) ---> Offset (14b)
  *
  * 4KB Compat (39-bit VA):
  *   PGD (L1,  9b) ---> PMD (L2,  9b) ---> PTE (L3,  9b) ---> Offset (12b)
+ *
+ * Outside a compatibility MM, use the configured native PMD and PGD
+ * geometry, including folded levels and configurations with more levels.
  */
 
 static inline unsigned int mm_ptdesc_table_shift(const struct mm_struct *mm)
@@ -28,22 +31,24 @@ static inline unsigned long mm_ptrs_per_pte(const struct mm_struct *mm)
 
 static inline unsigned int mm_pmd_shift(const struct mm_struct *mm)
 {
-	return mm_pte_shift(mm) + mm_ptdesc_table_shift(mm);
+	return mm_is_p3s_4k(mm) ?
+		mm_pte_shift(mm) + mm_ptdesc_table_shift(mm) : PMD_SHIFT;
 }
 
 static inline unsigned long mm_ptrs_per_pmd(const struct mm_struct *mm)
 {
-	return mm_ptrs_per_pte(mm);
+	return mm_is_p3s_4k(mm) ? mm_ptrs_per_pte(mm) : PTRS_PER_PMD;
 }
 
 static inline unsigned int mm_pgdir_shift(const struct mm_struct *mm)
 {
-	return mm_pmd_shift(mm) + mm_ptdesc_table_shift(mm);
+	return mm_is_p3s_4k(mm) ?
+		mm_pmd_shift(mm) + mm_ptdesc_table_shift(mm) : PGDIR_SHIFT;
 }
 
 static inline unsigned long mm_ptrs_per_pgd(const struct mm_struct *mm)
 {
-	return mm_ptrs_per_pte(mm);
+	return mm_is_p3s_4k(mm) ? mm_ptrs_per_pte(mm) : PTRS_PER_PGD;
 }
 
 static inline unsigned long mm_pgd_index(const struct mm_struct *mm,
@@ -75,19 +80,16 @@ static inline pgd_t *mm_pgd_offset(const struct mm_struct *mm,
  */
 #define pgd_offset(mm, addr) mm_pgd_offset((mm), (addr))
 
-static inline pmd_t *mm_pmd_offset(const struct mm_struct *mm,
-				   const pud_t *pud, unsigned long addr)
-{
-	return (pmd_t *)__va(pud_val(*pud) & PHYS_MASK & (s32)PAGE_MASK) +
-	       mm_pmd_index(mm, addr);
-}
+/* Expand after the architecture's descriptor decoding helpers are defined. */
+#ifdef __PAGETABLE_PMD_FOLDED
+#define mm_pmd_offset(mm, pud, addr) ((pmd_t *)(pud))
+#else
+#define mm_pmd_offset(mm, pud, addr) \
+	((pmd_t *)__va(__pud_to_phys(*(pud))) + mm_pmd_index((mm), (addr)))
+#endif
 
-static inline pte_t *mm_pte_offset_kernel(const struct mm_struct *mm,
-					  const pmd_t *pmd, unsigned long addr)
-{
-	return (pte_t *)__va(pmd_val(*pmd) & PHYS_MASK & (s32)PAGE_MASK) +
-	       mm_pte_index(mm, addr);
-}
+#define mm_pte_offset_kernel(mm, pmd, addr) \
+	((pte_t *)__va(__pmd_to_phys(*(pmd))) + mm_pte_index((mm), (addr)))
 
 /*
  * contpte_is_enabled - Check if ContPTE contiguous PTEs are supported
