@@ -244,8 +244,8 @@ static int sel_mmap_handle_status(struct file *filp,
 
 	BUG_ON(!status);
 
-	/* only allows one page from the head */
-	if (vma->vm_pgoff > 0 || size != PAGE_SIZE)
+	/* Only map the first user page of the native status page. */
+	if (vma->vm_pgoff > 0 || size != vma_page_size(vma))
 		return -EIO;
 	/* disallow writable mapping */
 	if (vma->vm_flags & VM_WRITE)
