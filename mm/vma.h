@@ -105,6 +105,8 @@ struct vma_merge_struct {
 	unsigned long end;
 	pgoff_t pgoff;
 	pgoff_t anon_pgoff;
+	/* File offset within the native page for a proposed new range. */
+	unsigned short slice_off;
 
 	union {
 		/* Temporary while VMA flags are being converted. */

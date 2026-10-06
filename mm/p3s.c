@@ -59,18 +59,19 @@ bool vmg_can_merge_offsets(struct vma_merge_struct *vmg, bool merge_next)
 			return vmg->next->vm_pgoff ==
 			       vmg->pgoff + ((vmg->end - vmg->start) >> PAGE_SHIFT_4KB);
 
-		start_slice = (vmg->start >> PAGE_SHIFT_4KB) & P3S_SLICE_MASK;
+		/* File and virtual addresses need not have the same 16KB offset. */
+		start_slice = vmg->slice_off;
 		total_slices = start_slice + ((vmg->end - vmg->start) >> PAGE_SHIFT_4KB);
 
 		return vmg->next->vm_pgoff == vmg->pgoff + (total_slices >> P3S_SLICE_SHIFT) &&
-		       vma_slice_off(vmg->next) == ((vmg->end >> PAGE_SHIFT_4KB) & P3S_SLICE_MASK);
+		       vma_slice_off(vmg->next) == (total_slices & P3S_SLICE_MASK);
 	}
 
 	if (!vmg->prev)
 		return false;
 
 	return vma_can_merge_offsets(vmg->prev, vmg->pgoff,
-				     vmg->middle ? vma_slice_off(vmg->middle) :
-				     vma_slice_offset(vmg->prev, vmg->start),
+				     vmg->middle ? vma_slice_offset(vmg->middle, vmg->start) :
+				     vmg->slice_off,
 				     vmg->start, vmg_is_p3s_4k(vmg), !!vmg->file);
 }

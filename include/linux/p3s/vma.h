@@ -489,10 +489,11 @@ static inline void vma_set_range_slice(struct vm_area_struct *vma,
 				       unsigned long start, unsigned long end,
 				       pgoff_t pgoff)
 {
+	/* Derive the new slice while vm_start still describes the old range. */
+	vma_set_slice_off(vma, vma_slice_offset(vma, start));
 	vma->vm_start = start;
 	vma->vm_end = end;
 	vma->vm_pgoff = pgoff;
-	vma_set_slice_off(vma, vma_slice_offset(vma, start));
 }
 
 /*
