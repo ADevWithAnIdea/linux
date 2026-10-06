@@ -82,8 +82,10 @@ static int elf_core_dump(struct coredump_params *cprm);
 
 #ifdef CONFIG_ARM64_PER_PROCESS_PAGE_SIZE
 #define ELF_MIN_ALIGN	PAGE_SIZE
-#else
+#elif ELF_EXEC_PAGESIZE > PAGE_SIZE
 #define ELF_MIN_ALIGN	ELF_EXEC_PAGESIZE
+#else
+#define ELF_MIN_ALIGN	PAGE_SIZE
 #endif
 
 #ifndef ELF_CORE_EFLAGS
@@ -99,7 +101,7 @@ static struct linux_binfmt elf_format = {
 	.load_binary	= load_elf_binary,
 #ifdef CONFIG_COREDUMP
 	.core_dump	= elf_core_dump,
-	.min_coredump	= PAGE_SIZE_KERNEL,
+	.min_coredump	= ELF_EXEC_PAGESIZE,
 #endif
 };
 
