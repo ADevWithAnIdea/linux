@@ -262,7 +262,7 @@
 		mtp: mtp@314600000 {
 			compatible = "apple,t8140-mtp", "apple,t8140-rtk-helper-asc4", "apple,mtp", "apple,rtk-helper-asc4";
 			reg = <0x3 0x14600000 0x0 0x4000>,
-			      <0x3 0x14e00000 0x0 0x100000>;
+			      <0x3 0x14c00000 0x0 0x100000>;
 			reg-names = "asc", "sram";
 			mboxes = <&mtp_mbox>;
 			iommus = <&mtp_dart 0>;
@@ -292,18 +292,19 @@
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ 1135 IRQ_TYPE_LEVEL_HIGH>;
 			#iommu-cells = <1>;
+			apple,sid-remap = <1 0>, <2 0>, <3 0>;
 
 			status = "disabled";
 		};
 
 		mtp_dockchannel: fifo@314b14000 {
 			compatible = "apple,t8140-dockchannel", "apple,dockchannel";
-			reg = <0x3 0x14b14000 0x0 0x4000>;
+			reg = <0x3 0x14b14000 0x0 0x1000>;
 			reg-names = "irq";
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ 1137 IRQ_TYPE_LEVEL_HIGH>;
 
-			ranges = <0 0x3 0x14b28000 0x20000>;
+			ranges = <0 0x3 0x14b28000 0x10000>;
 			nonposted-mmio;
 			#address-cells = <1>;
 			#size-cells = <1>;
@@ -314,11 +315,11 @@
 			status = "disabled";
 
 			mtp_hid: input@8000 {
-				compatible = "apple,dockchannel-hid";
-				reg = <0x8000 0x4000>,
-					<0xc000 0x4000>,
-					<0x0000 0x4000>,
-					<0x4000 0x4000>;
+				compatible = "apple,t8140-dockchannel-hid", "apple,dockchannel-hid";
+				reg = <0x8000 0x1000>,
+					<0xc000 0x1000>,
+					<0x0000 0x1000>,
+					<0x4000 0x1000>;
 				reg-names = "config", "data",
 					"rmt-config", "rmt-data";
 				iommus = <&mtp_dart 0>;

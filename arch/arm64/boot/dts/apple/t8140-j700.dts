@@ -76,6 +76,11 @@
 	status = "okay";
 };
 &mtp_hid {
+	multi-touch {
+		firmware-name = "apple/tpmtfw-j700.bin";
+	};
+	mtp {
+	};
 	keyboard: keyboard {
 		hid-country-code = <0>;
 		apple,keyboard-layout-id = <0>;
