@@ -764,7 +764,8 @@ static void vmg_adjust_set_range(struct vma_merge_struct *vmg)
 	else
 		return;
 
-	pgoff = vma_linear_page_index(adjust, vmg->end);
+	pgoff = vma_linear_page_index(vmg->__adjust_next_start ?
+				      vmg->middle : adjust, vmg->end);
 	anon_pgoff = __linear_anon_page_index(adjust, vmg->end);
 	vma_set_range_slice(adjust, vmg->end, adjust->vm_end, pgoff);
 	vma_set_anon_pgoff(adjust, anon_pgoff);
