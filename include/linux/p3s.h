@@ -7,6 +7,19 @@
 #include <linux/p3s/vma.h>
 #include <linux/p3s/mremap.h>
 
+#ifdef CONFIG_ARM64_PER_PROCESS_PAGE_SIZE
+long p3s_get_user_page(struct mm_struct *mm, unsigned long addr,
+		      unsigned int gup_flags, bool pin, bool remote,
+		      struct page **page, unsigned long *offset);
+#else
+static inline long p3s_get_user_page(struct mm_struct *mm, unsigned long addr,
+		unsigned int gup_flags, bool pin, bool remote,
+		struct page **page, unsigned long *offset)
+{
+	return -EINVAL;
+}
+#endif
+
 /* asm/p3s.h is architecture-specific to arm64 */
 #ifdef CONFIG_ARM64
 #include <asm/p3s/pgtable.h>

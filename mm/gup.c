@@ -3368,6 +3368,51 @@ long pin_user_pages_remote(struct mm_struct *mm,
 }
 EXPORT_SYMBOL(pin_user_pages_remote);
 
+#ifdef CONFIG_ARM64_PER_PROCESS_PAGE_SIZE
+/* Capture the page and its slice under the same mmap_lock acquisition. */
+long p3s_get_user_page(struct mm_struct *mm, unsigned long addr,
+		      unsigned int gup_flags, bool pin, bool remote,
+		      struct page **page, unsigned long *offset)
+{
+	P3S_CONTEXT_REMOTE_MM(mm);
+	unsigned int refs = pin ? FOLL_PIN : FOLL_GET;
+	int locked = 1;
+
+	if (!is_valid_gup_args(page, &locked, &gup_flags,
+			       refs | FOLL_TOUCH | (remote ? FOLL_REMOTE : 0)))
+		return -EINVAL;
+
+	for (;;) {
+		struct vm_area_struct *vma;
+		long ret;
+
+		locked = 1;
+		if (mmap_read_lock_killable(mm))
+			return -EINTR;
+		addr = untagged_addr_remote(mm, addr);
+		ret = __gup_longterm_locked(mm, addr, 1, page, &locked, gup_flags);
+		if (locked) {
+			vma = ret == 1 ? vma_lookup(mm, addr) : NULL;
+			if (vma)
+				*offset = vma_folio_offset(vma, addr);
+			mmap_read_unlock(mm);
+			if (ret != 1 || vma)
+				return ret;
+		}
+		if (ret <= 0)
+			return ret;
+		if (pin)
+			unpin_user_page(*page);
+		else
+			put_page(*page);
+		if (WARN_ON_ONCE(locked))
+			return -EFAULT;
+		/* A fault dropped the lock; the VMA may have changed meanwhile. */
+		cond_resched();
+	}
+}
+#endif
+
 /**
  * pin_user_pages() - pin user pages in memory for use by other devices
  *

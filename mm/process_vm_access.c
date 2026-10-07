@@ -34,7 +34,7 @@ static int process_vm_rw_pages(struct page **pages,
 	/* Do the copy for each page */
 	while (len && iov_iter_count(iter)) {
 		struct page *page = *pages++;
-		size_t copy = PAGE_SIZE - offset;
+		size_t copy = PAGE_SIZE_KERNEL - offset;
 		size_t copied;
 
 		if (copy > len)
@@ -57,7 +57,7 @@ static int process_vm_rw_pages(struct page **pages,
 #define PVM_MAX_KMALLOC_PAGES 2
 
 /* Maximum number of pages that can be stored at a time */
-#define PVM_MAX_USER_PAGES (PVM_MAX_KMALLOC_PAGES * PAGE_SIZE / sizeof(struct page *))
+#define PVM_MAX_USER_PAGES (PVM_MAX_KMALLOC_PAGES * PAGE_SIZE_KERNEL / sizeof(struct page *))
 
 /**
  * process_vm_rw_single_vec - read/write pages from task specified
@@ -85,6 +85,7 @@ static int process_vm_rw_single_vec(unsigned long addr,
 	unsigned long nr_pages;
 	ssize_t rc = 0;
 	unsigned int flags = 0;
+	bool slices = mm_is_p3s_4k(mm);
 
 	/* Work out address and page range required */
 	if (len == 0)
@@ -96,6 +97,7 @@ static int process_vm_rw_single_vec(unsigned long addr,
 
 	while (!rc && nr_pages && iov_iter_count(iter)) {
 		int pinned_pages = min_t(unsigned long, nr_pages, PVM_MAX_USER_PAGES);
+		unsigned long copy_offset = start_offset;
 		int locked = 1;
 		size_t bytes;
 
@@ -104,12 +106,18 @@ static int process_vm_rw_single_vec(unsigned long addr,
 		 * access remotely because task/mm might not
 		 * current/current->mm
 		 */
-		mmap_read_lock(mm);
-		pinned_pages = pin_user_pages_remote(mm, pa, pinned_pages,
-						     flags, process_pages,
-						     &locked);
-		if (locked)
-			mmap_read_unlock(mm);
+		if (slices) {
+			pinned_pages = p3s_get_user_page(mm, pa + start_offset,
+					flags, true, true,
+					process_pages, &copy_offset);
+		} else {
+			mmap_read_lock(mm);
+			pinned_pages = pin_user_pages_remote(mm, pa, pinned_pages,
+							     flags, process_pages,
+							     &locked);
+			if (locked)
+				mmap_read_unlock(mm);
+		}
 		if (pinned_pages <= 0)
 			return -EFAULT;
 
@@ -118,7 +126,7 @@ static int process_vm_rw_single_vec(unsigned long addr,
 			bytes = len;
 
 		rc = process_vm_rw_pages(process_pages,
-					 start_offset, bytes, iter,
+					 copy_offset, bytes, iter,
 					 vm_write);
 		len -= bytes;
 		start_offset = 0;
@@ -187,7 +195,7 @@ static ssize_t process_vm_rw_core(pid_t pid, struct iov_iter *iter,
 	if (nr_pages > PVM_MAX_PP_ARRAY_COUNT) {
 		/* For reliability don't try to kmalloc more than
 		   2 pages worth */
-		process_pages = kmalloc(min_t(size_t, PVM_MAX_KMALLOC_PAGES * PAGE_SIZE,
+		process_pages = kmalloc(min_t(size_t, PVM_MAX_KMALLOC_PAGES * PAGE_SIZE_KERNEL,
 					      sizeof(struct page *)*nr_pages),
 					GFP_KERNEL);
 
