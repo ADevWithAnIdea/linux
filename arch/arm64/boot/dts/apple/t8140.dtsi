@@ -340,6 +340,7 @@
 			gpio-controller;
 			#gpio-cells = <2>;
 			gpio-ranges = <&pinctrl_ap 0 0 216>;
+			gpio-reserved-ranges = <49 3 134 1>;
 			apple,npins = <216>;
 
 			interrupt-controller;
@@ -488,9 +489,9 @@
 		};
 
 
-		pcie0_dart: iommu@30079c000 {
+		pcie0_dart: iommu@390000000 {
 			compatible = "apple,t8140-dart", "apple,t8110-dart";
-			reg = <0x3 0x0079c000 0x0 0x4000>;
+			reg = <0x3 0x90000000 0x0 0x4000>;
 			#iommu-cells = <1>;
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ 1206 IRQ_TYPE_LEVEL_HIGH>;

@@ -23,6 +23,10 @@ int mt7921e_tx_prepare_skb(struct mt76_dev *mdev, void *txwi_ptr,
 
 	if (!wcid)
 		wcid = &dev->mt76.global_wcid;
+	if (is_mt7932(mdev) && !key &&
+	    !(info->flags & IEEE80211_TX_CTL_HW_80211_ENCAP) &&
+	    ieee80211_is_mgmt(((struct ieee80211_hdr *)tx_info->skb->data)->frame_control))
+		wcid = &dev->mt76.global_wcid;
 
 	t = (struct mt76_txwi_cache *)(txwi + mdev->drv->txwi_size);
 	t->skb = tx_info->skb;
@@ -40,9 +44,17 @@ int mt7921e_tx_prepare_skb(struct mt76_dev *mdev, void *txwi_ptr,
 		}
 	}
 
-	pid = mt76_tx_status_skb_add(mdev, wcid, tx_info->skb);
-	mt76_connac2_mac_write_txwi(mdev, txwi_ptr, tx_info->skb, wcid, key,
-				    pid, qid, 0);
+	if (is_mt7932(mdev) && mt7932_fullmac_is_tx(dev, tx_info->skb)) {
+		pid = 0;
+		mt7932_fullmac_txwi(dev, txwi_ptr, tx_info->skb);
+	} else {
+		pid = mt76_tx_status_skb_add(mdev, wcid, tx_info->skb);
+		mt76_connac2_mac_write_txwi(mdev, txwi_ptr, tx_info->skb, wcid, key,
+					    pid, qid, 0);
+	}
+	if (is_mt7932(mdev))
+		dev_info_ratelimited(mdev->dev, "MT7932 TX queue=%u wcid=%u pid=%u token=%u txd=%*ph\n",
+			qid, wcid->idx, pid, id, MT_TXD_SIZE, txwi_ptr);
 
 	txp = (struct mt76_connac_hw_txp *)(txwi + MT_TXD_SIZE);
 	memset(txp, 0, sizeof(struct mt76_connac_hw_txp));

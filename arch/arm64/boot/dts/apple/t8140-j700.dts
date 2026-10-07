@@ -16,6 +16,7 @@
 	model = "Apple MacBook Neo (A18 Pro, 2026)";
 
 	aliases {
+		wifi0 = &wifi0;
 		serial0 = &serial0;
 		keyboard = &keyboard;
 		atcphy0 = &atcphy0;
@@ -51,6 +52,15 @@
 
 &serial0 {
 	status = "okay";
+};
+
+&port00 {
+	wifi0: wifi@0,0 {
+		compatible = "pci14c3,7932";
+		reg = <0 0 0 0 0>;
+		/* The bootloader supplies the factory address from the ADT. */
+		local-mac-address = [00 00 00 00 00 00];
+	};
 };
 
 &mtp {

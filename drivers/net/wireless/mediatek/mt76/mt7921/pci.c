@@ -14,6 +14,8 @@
 #include "mcu.h"
 
 static const struct pci_device_id mt7921_pci_device_table[] = {
+	{ PCI_DEVICE(PCI_VENDOR_ID_MEDIATEK, 0x7932),
+		.driver_data = (kernel_ulong_t)MT7932_FIRMWARE_WM },
 	{ PCI_DEVICE(PCI_VENDOR_ID_MEDIATEK, 0x7961),
 		.driver_data = (kernel_ulong_t)MT7921_FIRMWARE_WM },
 	{ PCI_DEVICE(PCI_VENDOR_ID_MEDIATEK, 0x7922),
@@ -56,6 +58,10 @@ static void mt7921e_unregister_device(struct mt792x_dev *dev)
 	cancel_delayed_work_sync(&pm->ps_work);
 	cancel_work_sync(&pm->wake_work);
 	cancel_work_sync(&dev->reset_work);
+	if (is_mt7932(&dev->mt76)) {
+		mt792x_dma_disable(dev, true);
+		mt7932_fullmac_remove(dev);
+	}
 
 	mt76_connac2_tx_token_put(&dev->mt76);
 	__mt792x_mcu_drv_pmctrl(dev);
@@ -118,6 +124,14 @@ static u32 __mt7921_reg_addr(struct mt792x_dev *dev, u32 addr)
 
 	if (addr < 0x100000)
 		return addr;
+	if (is_mt7932(&dev->mt76)) {
+		if (addr >= 0x70000000 && addr < 0x70010000)
+			return 0x70000 + addr - 0x70000000;
+		if (addr >= 0x18050000 && addr < 0x18060000)
+			return 0x90000 + addr - 0x18050000;
+		if (addr >= 0x7c050000 && addr < 0x7c060000)
+			return 0x90000 + addr - 0x7c050000;
+	}
 
 	for (i = 0; i < ARRAY_SIZE(fixed_map); i++) {
 		u32 ofs;
@@ -175,10 +189,10 @@ static int mt7921_dma_init(struct mt792x_dev *dev)
 		.mcu_rxdone_ring_size  = MT7921_RX_MCU_RING_SIZE,
 		.has_mcu_wa            = true,
 	};
-	bool is_mt7902;
+	bool mt7902_variant;
 	int ret;
 
-	is_mt7902 = mt7921_l1_rr(dev, MT_HW_CHIPID) == 0x7902;
+	mt7902_variant = is_mt7902(&dev->mt76);
 
 	/*
 	 * MT7902 special case:
@@ -186,7 +200,7 @@ static int mt7921_dma_init(struct mt792x_dev *dev)
 	 *   - RX Ring0 is larger and shared for event/TX-done
 	 *   - MT7902 does not use the MCU_WA ring
 	 */
-	if (is_mt7902) {
+	if (mt7902_variant) {
 		layout.mcu_wm_txq           = MT7902_TXQ_MCU_WM;
 		layout.mcu_rxdone_ring_size = MT7902_RX_MCU_RING_SIZE;
 		layout.has_mcu_wa           = false;
@@ -222,8 +236,9 @@ static int mt7921_dma_init(struct mt792x_dev *dev)
 	/* event from WM before firmware download */
 	ret = mt76_queue_alloc(dev, &dev->mt76.q_rx[MT_RXQ_MCU],
 			       MT7921_RXQ_MCU_WM,
-			       layout.mcu_rxdone_ring_size,
-			       MT_RX_BUF_SIZE, MT_RX_EVENT_RING_BASE);
+			       is_mt7932(&dev->mt76) ? 32 : layout.mcu_rxdone_ring_size,
+			       is_mt7932(&dev->mt76) ? 2352 : MT_RX_BUF_SIZE,
+			       MT_RX_EVENT_RING_BASE);
 	if (ret)
 		return ret;
 
@@ -231,16 +246,41 @@ static int mt7921_dma_init(struct mt792x_dev *dev)
 		/* Change mcu queue after firmware download */
 		ret = mt76_queue_alloc(dev, &dev->mt76.q_rx[MT_RXQ_MCU_WA],
 				       MT7921_RXQ_MCU_WM,
-				       MT7921_RX_MCU_WA_RING_SIZE,
-				       MT_RX_BUF_SIZE, MT_WFDMA0(0x540));
+				       is_mt7932(&dev->mt76) ? 32 : MT7921_RX_MCU_WA_RING_SIZE,
+				       is_mt7932(&dev->mt76) ? 2352 : MT_RX_BUF_SIZE,
+				       MT_WFDMA0(0x540));
 		if (ret)
 			return ret;
 	}
 
 	/* rx data */
+	if (is_mt7932(&dev->mt76)) {
+		ret = mt76_queue_alloc(dev, &dev->mt76.q_rx[MT_RXQ_MAIN_WA],
+				       3, 32, 2352, MT_RX_EVENT_RING_BASE);
+		if (ret)
+			return ret;
+		ret = mt76_queue_alloc(dev, &dev->mt76.q_rx[MT_RXQ_BAND1_WA],
+				       8, 64, 2352, MT_RX_EVENT_RING_BASE);
+		if (ret)
+			return ret;
+		ret = mt76_queue_alloc(dev, &dev->mt76.q_rx[MT_RXQ_BAND1],
+				       7, 512, 2352, MT_RX_EVENT_RING_BASE);
+		if (ret)
+			return ret;
+		ret = mt76_queue_alloc(dev, &dev->mt76.q_rx[MT_RXQ_BAND2],
+				       5, 224, 2352, MT_RX_EVENT_RING_BASE);
+		if (ret)
+			return ret;
+		ret = mt76_queue_alloc(dev, &dev->mt76.q_rx[MT_RXQ_BAND2_WA],
+				       6, 128, 2352, MT_RX_EVENT_RING_BASE);
+		if (ret)
+			return ret;
+	}
 	ret = mt76_queue_alloc(dev, &dev->mt76.q_rx[MT_RXQ_MAIN],
-			       MT7921_RXQ_BAND0, MT7921_RX_RING_SIZE,
-			       MT_RX_BUF_SIZE, MT_RX_DATA_RING_BASE);
+			       MT7921_RXQ_BAND0,
+			       is_mt7932(&dev->mt76) ? 512 : MT7921_RX_RING_SIZE,
+			       is_mt7932(&dev->mt76) ? 2352 : MT_RX_BUF_SIZE,
+			       MT_RX_DATA_RING_BASE);
 	if (ret)
 		return ret;
 
@@ -399,12 +439,25 @@ static int mt7921_pci_probe(struct pci_dev *pdev,
 	ret = __mt792xe_mcu_drv_pmctrl(dev);
 	if (ret)
 		goto err_free_dev;
+	if (id->device == 0x7932) {
+		mdev->rev = (0x7932 << 16) | (mt76_rr(dev, 0xb1000) & 0xff);
+		mt76_wr(dev, 0xfe250, 0x70001846);
+		udelay(2);
+		mt76_wr(dev, 0xfe254, 0x18051848);
+		udelay(2);
+		if ((mt76_rr(dev, 0xfe250) >> 16) != 0x7000 ||
+		    (mt76_rr(dev, 0xfe254) >> 16) != 0x1805) {
+			ret = -EIO;
+			goto err_free_dev;
+		}
+	} else {
 
 	chipid = mt7921_l1_rr(dev, MT_HW_CHIPID);
 	if (chipid == 0x7961 && (mt7921_l1_rr(dev, MT_HW_BOUND) & BIT(7)))
 		chipid = 0x7920;
 	mdev->rev = (chipid << 16) |
 		    (mt7921_l1_rr(dev, MT_HW_REV) & 0xff);
+	}
 	dev_info(mdev->dev, "ASIC revision: %04x\n", mdev->rev);
 
 	ret = mt792x_wfsys_reset(dev);
@@ -413,7 +466,7 @@ static int mt7921_pci_probe(struct pci_dev *pdev,
 
 	mt76_wr(dev, irq_map.host_irq_enable, 0);
 
-	mt76_wr(dev, MT_PCIE_MAC_INT_ENABLE, 0xff);
+	mt76_wr(dev, MT_PCIE_MAC_INT_ENABLE, is_mt7932(mdev) ? 0x1ff : 0xff);
 
 	ret = devm_request_irq(mdev->dev, pdev->irq, mt792x_irq_handler,
 			       IRQF_SHARED, KBUILD_MODNAME, dev);
