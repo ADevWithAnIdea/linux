@@ -2624,6 +2624,40 @@ out:
 	return ret;
 }
 
+/* Page arrays contain native pages, even when userspace uses 4K PTEs. */
+static int insert_pages_p3s(struct vm_area_struct *vma, unsigned long addr,
+			    struct page **pages, unsigned long *num)
+{
+	unsigned long remaining = *num;
+	unsigned int slice = vma_slice_offset(vma, addr);
+	unsigned long available;
+	int ret;
+
+	available = DIV_ROUND_UP(vma->vm_end - addr +
+				((unsigned long)slice << PAGE_SHIFT_4KB),
+				PAGE_SIZE_KERNEL);
+	if (remaining > available)
+		return -EFAULT;
+
+	while (remaining) {
+		do {
+			ret = insert_page(vma, addr, *pages,
+					  vma->vm_page_prot, false);
+			if (ret) {
+				*num = remaining;
+				return ret;
+			}
+			addr += PAGE_SIZE_4KB;
+			slice++;
+		} while (slice < P3S_SLICES_PER_PAGE && addr < vma->vm_end);
+		pages++;
+		remaining--;
+		slice = 0;
+	}
+	*num = 0;
+	return 0;
+}
+
 /**
  * vm_insert_pages - insert multiple pages into user vma, batching the pmd lock.
  * @vma: user vma to map to
@@ -2653,6 +2687,8 @@ int vm_insert_pages(struct vm_area_struct *vma, unsigned long addr,
 		VM_WARN_ON_ONCE(vma->vm_flags & VM_PFNMAP);
 		vm_flags_set(vma, VM_MIXEDMAP);
 	}
+	if (vma_is_p3s_4k(vma))
+		return insert_pages_p3s(vma, addr, pages, num);
 	/* Defer page refcount checking till we're about to map that page. */
 	return insert_pages(vma, addr, pages, num, vma->vm_page_prot);
 }
@@ -2754,8 +2790,10 @@ static int __vm_map_pages(struct vm_area_struct *vma, struct page **pages,
 				unsigned long num, unsigned long offset)
 {
 	P3S_CONTEXT_REMOTE_MM(vma->vm_mm);
-	unsigned long count = vma_pages(vma);
 	unsigned long uaddr = vma->vm_start;
+	unsigned long count = DIV_ROUND_UP(vma_size(vma) +
+		((unsigned long)vma_slice_offset(vma, uaddr) << PAGE_SHIFT_4KB),
+		PAGE_SIZE_KERNEL);
 
 	/* Fail if the user requested offset is beyond the end of the object */
 	if (offset >= num)
