@@ -12,7 +12,7 @@
 struct file;
 unsigned long __get_unmapped_area(struct file *file, unsigned long addr,
 				  unsigned long len, unsigned long pgoff,
-				  unsigned long flags, vm_flags_t vm_flags);
+				  unsigned long flags, vma_flags_t vma_flags);
 
 /**
  * mm_mremap_get_unmapped_area - Find unmapped area for mremap with slice preservation
@@ -77,21 +77,21 @@ static inline unsigned long mm_mremap_get_unmapped_area(struct file *file,
 			 */
 			if (addr) {
 				res = __get_unmapped_area(file, addr, len,
-							  pgoff, map_flags, 0);
+							  pgoff, map_flags, EMPTY_VMA_FLAGS);
 				if (res == addr || IS_ERR_VALUE(res))
 					return res;
 			}
 
 			res = __get_unmapped_area(file, addr,
 						  len + PAGE_SIZE_KERNEL,
-						  pgoff, map_flags, 0);
+						  pgoff, map_flags, EMPTY_VMA_FLAGS);
 			if (!IS_ERR_VALUE(res))
 				res += (unsigned long)slice << PAGE_SHIFT_4KB;
 			return res;
 		}
 	}
 
-	return __get_unmapped_area(file, addr, len, pgoff, map_flags, 0);
+	return __get_unmapped_area(file, addr, len, pgoff, map_flags, EMPTY_VMA_FLAGS);
 }
 
 #endif /* _LINUX_P3S_MREMAP_H */

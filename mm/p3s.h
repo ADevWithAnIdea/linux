@@ -287,7 +287,7 @@ static inline bool p3s_uffd_install_anon_folio(struct vm_area_struct *dst_vma,
 	if (writable)
 		*dst_pte_val = pte_mkwrite(*dst_pte_val, dst_vma);
 	if (flags & MFILL_ATOMIC_WP)
-		*dst_pte_val = pte_mkuffd_wp(*dst_pte_val);
+		*dst_pte_val = pte_mkuffd(*dst_pte_val);
 
 	folio_put(folio);
 	return true;
@@ -493,8 +493,8 @@ static inline bool p3s_wp_install_folio_slices(struct folio *new_folio,
 		entry = pte_sw_mkyoung(entry);
 		if (pte_soft_dirty(ptent))
 			entry = pte_mksoft_dirty(entry);
-		if (pte_uffd_wp(ptent))
-			entry = pte_mkuffd_wp(entry);
+		if (pte_uffd(ptent))
+			entry = pte_mkuffd(entry);
 		entry = maybe_mkwrite(pte_mkdirty(entry), vma);
 
 		set_pte_at(mm, slice_addr, ptep, entry);

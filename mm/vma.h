@@ -267,11 +267,6 @@ static inline pgoff_t vmg_start_pgoff(const struct vma_merge_struct *vmg)
 	return vmg->pgoff;
 }
 
-static inline pgoff_t vmg_end_pgoff(const struct vma_merge_struct *vmg)
-{
-	return vmg_start_pgoff(vmg) + vmg_pages(vmg);
-}
-
 static inline void assert_sane_pgoff(struct vm_area_struct *vma, pgoff_t pgoff)
 {
 	/* nommu doesn't set a virtual pgoff for anon VMAs. */
@@ -291,7 +286,7 @@ static inline void assert_sane_pgoff(struct vm_area_struct *vma, pgoff_t pgoff)
 	if (vma->anon_vma)
 		return;
 	/* OK this is really an anon VMA - expect virtual page offset. */
-	VM_WARN_ON_ONCE(pgoff != vma->vm_start >> PAGE_SHIFT);
+	VM_WARN_ON_ONCE(pgoff != vma->vm_start >> mm_pte_shift(vma->vm_mm));
 }
 
 static inline void vma_set_pgoff(struct vm_area_struct *vma, pgoff_t pgoff)

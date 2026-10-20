@@ -21,7 +21,6 @@
 
 /* Internal core VMA manipulation functions. */
 #include "vma.h"
-#include "p3s.h"
 
 struct folio_batch;
 struct hstate;
@@ -65,6 +64,8 @@ void lru_add_drain_cpu(int cpu);
 void lru_add_drain_cpu_zone(struct zone *zone);
 void folio_deactivate(struct folio *folio);
 void folio_mark_lazyfree(struct folio *folio);
+
+#include "p3s.h"
 
 /* mm/vmscan.c */
 unsigned long zone_reclaimable_pages(struct zone *zone);

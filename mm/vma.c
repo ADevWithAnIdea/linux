@@ -55,7 +55,7 @@ struct mmap_state {
 		.vmi = vmi_,						\
 		.addr = addr_,						\
 		.end = (addr_) + (len_),				\
-		.pgoff = (file_) ? mm_mmap_pgoff(mm_, pgoff_) : (pgoff_),					\
+		.pgoff = (file_) ? mm_mmap_pgoff(mm_, pgoff_) : (pgoff_), \
 		.anon_pgoff = anon_pgoff_,				\
 		.slice_off = (file_) ? mm_mmap_slice_off(mm_, pgoff_) : 0, \
 		.pglen = (len_) >> PAGE_SHIFT,				\
@@ -1953,11 +1953,11 @@ struct vm_area_struct *copy_vma(struct vm_area_struct **vmap,
 	if (new_vma && new_vma->vm_start < addr + len)
 		return NULL;	/* should never get here */
 
-	vmg.prev = vma_filter_merge_neighbor(vmg.prev, vma, faulted_in_anon_vma);
+	vmg.prev = vma_filter_merge_neighbor(vmg.prev, vma, !can_self_merge);
 	vmg.pgoff = pgoff;
 	vmg.anon_pgoff = anon_pgoff;
 	vmg.next = vma_filter_merge_neighbor(vma_iter_next_rewind(&vmi, NULL),
-					     vma, faulted_in_anon_vma);
+					     vma, !can_self_merge);
 
 	/*
 	 * If the original VMA is kept (MREMAP_DONTUNMAP), the source and
@@ -1999,7 +1999,7 @@ struct vm_area_struct *copy_vma(struct vm_area_struct **vmap,
 		new_vma = vm_area_dup(vma);
 		if (!new_vma)
 			goto out;
-		copy_vma_set_range(new_vma, vma, addr, len, pgoff, faulted_in_anon_vma);
+		copy_vma_set_range(new_vma, vma, addr, len, pgoff, !can_self_merge);
 		vma_set_anon_pgoff(new_vma, anon_pgoff);
 		if (vma_dup_policy(vma, new_vma))
 			goto out_free_vma;

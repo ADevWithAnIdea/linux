@@ -5605,7 +5605,7 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
 
 	p3s_anon_install_folio(vma, vmf, &folio, addr, nr_pages, &entry);
 	if (vmf_orig_pte_uffd_wp(vmf))
-		entry = pte_mkuffd_wp(entry);
+		entry = pte_mkuffd(entry);
 	set_ptes(vma->vm_mm, addr, vmf->pte, entry, nr_pages);
 
 	/* No need to invalidate - it was non-present before */
