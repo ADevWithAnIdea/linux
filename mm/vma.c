@@ -2559,7 +2559,7 @@ static int __mmap_setup(struct mmap_state *map, struct vm_area_desc *desc,
 		map->charged = map->pglen;
 		map->charged -= vms->nr_accounted;
 		if (map->charged) {
-			error = security_vm_enough_memory_mm(map->mm, map->charged);
+			error = security_vm_enough_memory_mm_private(map->mm, map->charged);
 			if (error)
 				return error;
 		}
@@ -3011,7 +3011,7 @@ int do_brk_flags(struct vma_iterator *vmi, struct vm_area_struct *vma,
 	if (mm->map_count > get_sysctl_max_map_count())
 		return -ENOMEM;
 
-	if (security_vm_enough_memory_mm(mm, len >> PAGE_SHIFT))
+	if (security_vm_enough_memory_mm_private(mm, len >> PAGE_SHIFT))
 		return -ENOMEM;
 
 	/*
@@ -3213,7 +3213,7 @@ static int acct_stack_growth(struct vm_area_struct *vma,
 	 * Overcommit..  This must be the final test, as it will
 	 * update security statistics.
 	 */
-	if (security_vm_enough_memory_mm(mm, grow))
+	if (security_vm_enough_memory_mm_private(mm, grow))
 		return -ENOMEM;
 
 	return 0;
@@ -3414,7 +3414,7 @@ int insert_vm_struct(struct mm_struct *mm, struct vm_area_struct *vma)
 		return -ENOMEM;
 
 	if (vma_test(vma, VMA_ACCOUNT_BIT) &&
-	     security_vm_enough_memory_mm(mm, charged))
+	     security_vm_enough_memory_mm_private(mm, charged))
 		return -ENOMEM;
 
 	/*

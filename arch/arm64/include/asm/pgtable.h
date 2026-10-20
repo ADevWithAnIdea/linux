@@ -675,6 +675,14 @@ static inline pgprot_t pud_pgprot(pud_t pud)
 	return __pgprot(pud_val(pfn_pud(pfn, __pgprot(0))) ^ pud_val(pud));
 }
 
+#ifdef CONFIG_ARM64_PER_PROCESS_PAGE_SIZE
+void p3s_account_pte(struct mm_struct *mm, unsigned long addr, pte_t *ptep,
+		     pte_t old, pte_t new);
+#else
+static inline void p3s_account_pte(struct mm_struct *mm, unsigned long addr,
+				   pte_t *ptep, pte_t old, pte_t new) { }
+#endif
+
 static inline void __set_ptes_anysz(struct mm_struct *mm, unsigned long addr,
 				    pte_t *ptep, pte_t pte, unsigned int nr,
 				    unsigned long pgsize)
@@ -697,11 +705,14 @@ static inline void __set_ptes_anysz(struct mm_struct *mm, unsigned long addr,
 	__sync_cache_and_tags(pte, nr_pages);
 
 	for (;;) {
+		if (unlikely(mm_is_p3s_4k(mm)) && pgsize == PAGE_SIZE_4KB)
+			p3s_account_pte(mm, addr, ptep, __ptep_get(ptep), pte);
 		__check_safe_pte_update(mm, ptep, pte);
 		__set_pte_nosync(ptep, pte);
 		if (--nr == 0)
 			break;
 		ptep++;
+		addr += pgsize;
 		pte = pte_advance_phys(pte, pgsize);
 	}
 
@@ -1299,6 +1310,8 @@ static inline bool pud_user_accessible_page(struct mm_struct *mm, unsigned long 
 static inline void __pte_clear(struct mm_struct *mm,
 			       unsigned long addr, pte_t *ptep)
 {
+	if (unlikely(mm_is_p3s_4k(mm)))
+		p3s_account_pte(mm, addr, ptep, __ptep_get(ptep), __pte(0));
 	__set_pte(ptep, __pte(0));
 }
 
@@ -1356,6 +1369,10 @@ static inline pte_t __ptep_get_and_clear_anysz(struct mm_struct *mm,
 {
 	pte_t pte = __pte(xchg_relaxed(&pte_val(*ptep), 0));
 
+	if (unlikely(mm_is_p3s_4k(mm)) &&
+	    (pgsize == PAGE_SIZE_KERNEL || pgsize == PAGE_SIZE_4KB))
+		p3s_account_pte(mm, address, ptep, pte, __pte(0));
+
 	switch (pgsize) {
 	case PAGE_SIZE:
 		page_table_check_pte_clear(mm, address, pte);
@@ -1389,7 +1406,7 @@ static inline void __clear_full_ptes(struct mm_struct *mm, unsigned long addr,
 		if (--nr == 0)
 			break;
 		ptep++;
-		addr += PAGE_SIZE;
+		addr += mm_pte_size(mm);
 	}
 }
 
@@ -1402,7 +1419,7 @@ static inline pte_t __get_and_clear_full_ptes(struct mm_struct *mm,
 	pte = __ptep_get_and_clear(mm, addr, ptep);
 	while (--nr) {
 		ptep++;
-		addr += PAGE_SIZE;
+		addr += mm_pte_size(mm);
 		tmp_pte = __ptep_get_and_clear(mm, addr, ptep);
 		if (pte_dirty(tmp_pte))
 			pte = pte_mkdirty(pte);

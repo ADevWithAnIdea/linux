@@ -127,19 +127,26 @@ bool path_noexec(const struct path *path)
 /*
  * The nascent bprm->mm is not visible until exec_mmap() but it can
  * use a lot of memory, account these pages in current->mm temporary
- * for oom_badness()->get_mm_rss(). Once exec succeeds or fails, we
+ * for oom_badness(). Once exec succeeds or fails, we
  * change the counter back via acct_arg_size(0).
  */
 static void acct_arg_size(struct linux_binprm *bprm, unsigned long pages)
 {
 	struct mm_struct *mm = current->mm;
-	long diff = (long)(pages - bprm->vma_pages);
+	long diff;
 
+	/* bprm->mm can have a different granule from current->mm. */
+	pages = DIV_ROUND_UP(pages, mm_slices_per_page(bprm->mm));
+	diff = (long)(pages - bprm->vma_pages);
 	if (!mm || !diff)
 		return;
 
 	bprm->vma_pages = pages;
-	add_mm_counter(mm, MM_ANONPAGES, diff);
+	add_mm_counter(mm, MM_ANONPAGES, diff * mm_slices_per_page(mm));
+#ifdef CONFIG_ARM64_PER_PROCESS_PAGE_SIZE
+	if (mm_is_p3s_4k(mm))
+		atomic_long_add(diff, &mm->p3s_oom_pages);
+#endif
 }
 
 static struct page *get_arg_page(struct linux_binprm *bprm, unsigned long pos,
@@ -915,7 +922,7 @@ static int exec_mmap(struct linux_binprm *bprm)
 /* Release the address space replaced by exec, outside the exec locks. */
 static void exec_mm_put_old(struct mm_struct *old_mm)
 {
-	setmax_mm_hiwater_rss(&current->signal->maxrss, old_mm);
+	setmax_mm_hiwater_rss_kb(&current->signal->maxrss, old_mm);
 	mm_update_next_owner(old_mm);
 	mmput(old_mm);
 }

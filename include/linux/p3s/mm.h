@@ -144,6 +144,26 @@ static inline unsigned long mm_pages_to_kb(const struct mm_struct *mm,
 	return nr << (mm_pte_shift(mm) - 10);
 }
 
+/* Logical mapped pages expressed in native units; include a partial page. */
+static inline unsigned long mm_pages_to_native(const struct mm_struct *mm,
+					       unsigned long nr)
+{
+	return DIV_ROUND_UP(nr, mm_slices_per_page(mm));
+}
+
+/* /proc stat/statm page counts are interpreted in the reader's page size. */
+static inline unsigned long mm_pages_to_reader(const struct mm_struct *mm,
+					       const struct mm_struct *reader,
+					       unsigned long nr)
+{
+	unsigned int src = mm_pte_shift(mm);
+	unsigned int dst = mm_pte_shift(reader);
+
+	if (src >= dst)
+		return nr << (src - dst);
+	return DIV_ROUND_UP(nr, 1UL << (dst - src));
+}
+
 static inline unsigned long mm_phys_pfn(const struct mm_struct *mm,
 					phys_addr_t x)
 {

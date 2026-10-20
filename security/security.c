@@ -719,20 +719,7 @@ int security_settime64(const struct timespec64 *ts, const struct timezone *tz)
 	return call_int_hook(settime, ts, tz);
 }
 
-/**
- * security_vm_enough_memory_mm() - Check if allocating a new mem map is allowed
- * @mm: mm struct
- * @pages: number of pages
- *
- * Check permissions for allocating a new virtual mapping.  If all LSMs return
- * a positive value, __vm_enough_memory() will be called with cap_sys_admin
- * set. If at least one LSM returns 0 or negative, __vm_enough_memory() will be
- * called with cap_sys_admin cleared.
- *
- * Return: Returns 0 if permission is granted by the LSM infrastructure to the
- *         caller.
- */
-int security_vm_enough_memory_mm(struct mm_struct *mm, long pages)
+static int vm_enough_memory_cap_sys_admin(struct mm_struct *mm, long pages)
 {
 	struct lsm_static_call *scall;
 	int cap_sys_admin = 1;
@@ -751,7 +738,33 @@ int security_vm_enough_memory_mm(struct mm_struct *mm, long pages)
 			break;
 		}
 	}
-	return __vm_enough_memory(mm, pages, cap_sys_admin);
+	return cap_sys_admin;
+}
+
+/**
+ * security_vm_enough_memory_mm() - Check if allocating a new mem map is allowed
+ * @mm: mm struct
+ * @pages: conservative native-page allocation promises
+ *
+ * Check permissions for allocating a new virtual mapping.  If all LSMs return
+ * a positive value, __vm_enough_memory() will be called with cap_sys_admin
+ * set. If at least one LSM returns 0 or negative, __vm_enough_memory() will be
+ * called with cap_sys_admin cleared.
+ *
+ * Return: Returns 0 if permission is granted by the LSM infrastructure to the
+ *         caller.
+ */
+int security_vm_enough_memory_mm(struct mm_struct *mm, long pages)
+{
+	return __vm_enough_memory(mm, pages,
+				 vm_enough_memory_cap_sys_admin(mm, pages));
+}
+
+/* Private VMAs use target PTE units; shared/native callers keep the API above. */
+int security_vm_enough_memory_mm_private(struct mm_struct *mm, long pages)
+{
+	return __vm_enough_memory_private(mm, pages,
+				 vm_enough_memory_cap_sys_admin(mm, pages));
 }
 
 /**

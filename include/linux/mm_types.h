@@ -1316,6 +1316,10 @@ struct mm_struct {
 #endif
 
 		struct percpu_counter rss_stat[NR_MM_COUNTERS];
+#ifdef CONFIG_ARM64_PER_PROCESS_PAGE_SIZE
+		/* Native backing pages, deduplicated within each slice window. */
+		atomic_long_t p3s_oom_pages;
+#endif
 
 		struct linux_binfmt *binfmt;
 

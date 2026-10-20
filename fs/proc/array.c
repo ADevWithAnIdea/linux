@@ -466,7 +466,7 @@ int proc_pid_status(struct seq_file *m, struct pid_namespace *ns,
 static int do_task_stat(struct seq_file *m, struct pid_namespace *ns,
 			struct pid *pid, struct task_struct *task, int whole)
 {
-	unsigned long vsize, eip, esp, wchan = 0;
+	unsigned long vsize, eip, esp, wchan = 0, rss = 0;
 	int priority, nice;
 	int tty_pgrp = -1, tty_nr = 0;
 	sigset_t sigign, sigcatch;
@@ -494,6 +494,8 @@ static int do_task_stat(struct seq_file *m, struct pid_namespace *ns,
 	mm = get_task_mm(task);
 	if (mm) {
 		vsize = task_vsize(mm);
+		/* Keep the native approximate-counter fast path. */
+		rss = mm_is_p3s_4k(mm) ? get_mm_rss_sum(mm) : get_mm_rss(mm);
 		/*
 		 * esp and eip are intentionally zeroed out.  There is no
 		 * non-racy way to read them without freezing the task.
@@ -610,7 +612,8 @@ static int do_task_stat(struct seq_file *m, struct pid_namespace *ns,
 	seq_put_decimal_ull(m, " ", 0);
 	seq_put_decimal_ull(m, " ", start_time);
 	seq_put_decimal_ull(m, " ", vsize);
-	seq_put_decimal_ull(m, " ", mm ? get_mm_rss(mm) : 0);
+	seq_put_decimal_ull(m, " ", mm ?
+		mm_pages_to_reader(mm, current->mm, rss) : 0);
 	seq_put_decimal_ull(m, " ", rsslim);
 	seq_put_decimal_ull(m, " ", mm ? (permitted ? mm->start_code : 1) : 0);
 	seq_put_decimal_ull(m, " ", mm ? (permitted ? mm->end_code : 1) : 0);

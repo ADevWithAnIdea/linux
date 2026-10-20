@@ -13,6 +13,7 @@
 #include <linux/acct.h>
 #include <linux/jiffies.h>
 #include <linux/mm.h>
+#include <linux/math64.h>
 
 /*
  * fill in basic accounting fields
@@ -91,16 +92,16 @@ void xacct_add_tsk(struct taskstats *stats, struct task_struct *p)
 {
 	struct mm_struct *mm;
 
-	/* convert pages-nsec/1024 to Mbyte-usec, see __acct_update_integrals */
-	stats->coremem = p->acct_rss_mem1 * PAGE_SIZE;
-	do_div(stats->coremem, 1000 * KB);
-	stats->virtmem = p->acct_vm_mem1 * PAGE_SIZE;
-	do_div(stats->virtmem, 1000 * KB);
+	/* Fixed native-page-nsec/1024 to MiB-usec, including across exec. */
+	stats->coremem = mul_u64_u32_div(p->acct_rss_mem1,
+				       1U << (PAGE_SHIFT_KERNEL - 10), 1000);
+	stats->virtmem = mul_u64_u32_div(p->acct_vm_mem1,
+				       1U << (PAGE_SHIFT_KERNEL - 10), 1000);
 	mm = get_task_mm(p);
 	if (mm) {
 		/* adjust to KB unit */
-		stats->hiwater_rss   = get_mm_hiwater_rss(mm) * PAGE_SIZE / KB;
-		stats->hiwater_vm    = get_mm_hiwater_vm(mm)  * PAGE_SIZE / KB;
+		stats->hiwater_rss   = mm_pages_to_kb(mm, get_mm_hiwater_rss(mm));
+		stats->hiwater_vm    = mm_pages_to_kb(mm, get_mm_hiwater_vm(mm));
 		mmput(mm);
 	}
 	stats->read_char	= p->ioac.rchar & KB_MASK;
@@ -136,12 +137,16 @@ static void __acct_update_integrals(struct task_struct *tsk,
 
 	tsk->acct_timexpd = time;
 	/*
-	 * Divide by 1024 to avoid overflow, and to avoid division.
-	 * The final unit reported to userspace is Mbyte-usecs,
-	 * the rest of the math is done in xacct_add_tsk.
+	 * Store native-page-nsec/1024 using the fixed kernel page size, so
+	 * exec cannot reinterpret earlier samples and accumulator headroom
+	 * matches native accounting. Multiply KiB before shifting to retain
+	 * fractional native pages in 4K mms. Export converts to MiB-usec.
 	 */
-	tsk->acct_rss_mem1 += delta * get_mm_rss(tsk->mm) >> 10;
-	tsk->acct_vm_mem1 += delta * READ_ONCE(tsk->mm->total_vm) >> 10;
+	tsk->acct_rss_mem1 += mul_u64_u64_shr(delta,
+		mm_pages_to_kb(tsk->mm, get_mm_rss(tsk->mm)), PAGE_SHIFT_KERNEL);
+	tsk->acct_vm_mem1 += mul_u64_u64_shr(delta,
+		mm_pages_to_kb(tsk->mm, READ_ONCE(tsk->mm->total_vm)),
+		PAGE_SHIFT_KERNEL);
 }
 
 /**

@@ -910,7 +910,7 @@ unsigned long vm_commit_limit(void)
 	unsigned long allowed;
 
 	if (sysctl_overcommit_kbytes)
-		allowed = sysctl_overcommit_kbytes >> (PAGE_SHIFT - 10);
+		allowed = sysctl_overcommit_kbytes >> (PAGE_SHIFT_KERNEL - 10);
 	else
 		allowed = ((totalram_pages() - hugetlb_total_pages())
 			   * sysctl_overcommit_ratio / 100);
@@ -960,11 +960,18 @@ EXPORT_SYMBOL_GPL(vm_memory_committed);
  * Note this is a helper function intended to be used by LSMs which
  * wish to use this logic.
  */
-int __vm_enough_memory(const struct mm_struct *mm, long pages, int cap_sys_admin)
+static int vm_enough_memory(const struct mm_struct *mm, long pages,
+			    long guess_pages, int cap_sys_admin)
 {
 	long allowed;
 	unsigned long bytes_failed;
 
+	/*
+	 * Keep charges in conservative native allocation promises in every
+	 * policy, so switching policies cannot unbalance later uncharges.
+	 * A private 4K PTE may need a whole native page after COW. Only the
+	 * heuristic admission check uses dense mapped bytes instead.
+	 */
 	vm_acct_memory(pages);
 
 	/*
@@ -974,7 +981,7 @@ int __vm_enough_memory(const struct mm_struct *mm, long pages, int cap_sys_admin
 		return 0;
 
 	if (sysctl_overcommit_memory == OVERCOMMIT_GUESS) {
-		if (pages > totalram_pages() + total_swap_pages)
+		if (guess_pages > totalram_pages() + total_swap_pages)
 			goto error;
 		return 0;
 	}
@@ -984,13 +991,13 @@ int __vm_enough_memory(const struct mm_struct *mm, long pages, int cap_sys_admin
 	 * Reserve some for root
 	 */
 	if (!cap_sys_admin)
-		allowed -= sysctl_admin_reserve_kbytes >> (PAGE_SHIFT - 10);
+		allowed -= sysctl_admin_reserve_kbytes >> (PAGE_SHIFT_KERNEL - 10);
 
 	/*
 	 * Don't let a single process grow so big a user can't recover
 	 */
 	if (mm) {
-		long reserve = sysctl_user_reserve_kbytes >> (PAGE_SHIFT - 10);
+		long reserve = sysctl_user_reserve_kbytes >> (PAGE_SHIFT_KERNEL - 10);
 
 		allowed -= min_t(long, mm->total_vm / 32, reserve);
 	}
@@ -998,12 +1005,26 @@ int __vm_enough_memory(const struct mm_struct *mm, long pages, int cap_sys_admin
 	if (percpu_counter_read_positive(&vm_committed_as) < allowed)
 		return 0;
 error:
-	bytes_failed = pages << PAGE_SHIFT;
+	bytes_failed = pages << PAGE_SHIFT_KERNEL;
 	pr_warn_ratelimited("%s: pid: %d, comm: %s, bytes: %lu not enough memory for the allocation\n",
 			    __func__, current->pid, current->comm, bytes_failed);
 	vm_unacct_memory(pages);
 
 	return -ENOMEM;
+}
+
+/* Shared objects and other native-page callers already supply native units. */
+int __vm_enough_memory(const struct mm_struct *mm, long pages, int cap_sys_admin)
+{
+	return vm_enough_memory(mm, pages, pages, cap_sys_admin);
+}
+
+/* Private VMA counts are in the target mm's PTE units. */
+int __vm_enough_memory_private(const struct mm_struct *mm, long pages,
+			       int cap_sys_admin)
+{
+	return vm_enough_memory(mm, pages, mm_pages_to_native(mm, pages),
+				cap_sys_admin);
 }
 
 /**

@@ -1004,7 +1004,7 @@ static bool vrm_calc_charge(struct vma_remap_struct *vrm)
 
 
 	/* This accounts 'charged' pages of memory. */
-	if (security_vm_enough_memory_mm(current->mm, charged))
+	if (security_vm_enough_memory_mm_private(current->mm, charged))
 		return false;
 
 	vrm->charged = charged;

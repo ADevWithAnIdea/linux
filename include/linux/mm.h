@@ -3512,6 +3512,16 @@ static inline unsigned long get_mm_rss_sum(struct mm_struct *mm)
 		get_mm_counter_sum(mm, MM_SHMEMPAGES);
 }
 
+/* Same backing granularity as totalram_pages()/total_swap_pages. */
+static inline unsigned long get_mm_oom_pages(struct mm_struct *mm)
+{
+#ifdef CONFIG_ARM64_PER_PROCESS_PAGE_SIZE
+	if (mm_is_p3s_4k(mm))
+		return max(atomic_long_read(&mm->p3s_oom_pages), 0L);
+#endif
+	return get_mm_rss_sum(mm) + get_mm_counter_sum(mm, MM_SWAPENTS);
+}
+
 static inline unsigned long get_mm_hiwater_rss(struct mm_struct *mm)
 {
 	return max(mm->hiwater_rss, get_mm_rss(mm));
@@ -3541,10 +3551,10 @@ static inline void reset_mm_hiwater_rss(struct mm_struct *mm)
 	mm->hiwater_rss = get_mm_rss(mm);
 }
 
-static inline void setmax_mm_hiwater_rss(unsigned long *maxrss,
+static inline void setmax_mm_hiwater_rss_kb(unsigned long *maxrss,
 					 struct mm_struct *mm)
 {
-	unsigned long hiwater_rss = get_mm_hiwater_rss(mm);
+	unsigned long hiwater_rss = mm_pages_to_kb(mm, get_mm_hiwater_rss(mm));
 
 	if (*maxrss < hiwater_rss)
 		*maxrss = hiwater_rss;
@@ -4214,6 +4224,8 @@ void anon_rmap_tree_verify(struct anon_vma_chain *avc);
 
 /* mmap.c */
 extern int __vm_enough_memory(const struct mm_struct *mm, long pages, int cap_sys_admin);
+int __vm_enough_memory_private(const struct mm_struct *mm, long pages,
+			       int cap_sys_admin);
 extern void exit_mmap(struct mm_struct *);
 bool mmap_read_lock_maybe_expand(struct mm_struct *mm, struct vm_area_struct *vma,
 				 unsigned long addr, bool write);

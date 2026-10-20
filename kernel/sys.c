@@ -1921,12 +1921,12 @@ retry:
 out_thread:
 	mm = get_task_mm(p);
 	if (mm) {
-		setmax_mm_hiwater_rss(&maxrss, mm);
+		setmax_mm_hiwater_rss_kb(&maxrss, mm);
 		mmput(mm);
 	}
 
 out_children:
-	r->ru_maxrss = maxrss * (PAGE_SIZE / 1024); /* convert pages to KBs */
+	r->ru_maxrss = maxrss; /* signal maxima are stored in KiB, including across exec */
 	r->ru_utime = ns_to_kernel_old_timeval(utime);
 	r->ru_stime = ns_to_kernel_old_timeval(stime);
 }

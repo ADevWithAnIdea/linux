@@ -644,6 +644,12 @@ static void check_mm(struct mm_struct *mm)
 		}
 	}
 
+#ifdef CONFIG_ARM64_PER_PROCESS_PAGE_SIZE
+	if (atomic_long_read(&mm->p3s_oom_pages))
+		pr_alert("BUG: non-zero P3S backing pages on freeing mm: %ld\n",
+			 atomic_long_read(&mm->p3s_oom_pages));
+#endif
+
 	if (mm_pgtables_bytes(mm))
 		pr_alert("BUG: non-zero pgtables_bytes on freeing mm: %ld\n",
 				mm_pgtables_bytes(mm));
@@ -1103,6 +1109,9 @@ static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p)
 	mm->locked_vm = 0;
 	atomic64_set(&mm->pinned_vm, 0);
 	memset(&mm->rss_stat, 0, sizeof(mm->rss_stat));
+#ifdef CONFIG_ARM64_PER_PROCESS_PAGE_SIZE
+	atomic_long_set(&mm->p3s_oom_pages, 0);
+#endif
 	spin_lock_init(&mm->page_table_lock);
 	spin_lock_init(&mm->arg_lock);
 	mm_init_cpumask(mm);

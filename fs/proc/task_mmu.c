@@ -107,7 +107,11 @@ unsigned long task_statm(struct mm_struct *mm,
 								>> PAGE_SHIFT;
 	*data = mm->data_vm + mm->stack_vm;
 	*resident = *shared + get_mm_counter_sum(mm, MM_ANONPAGES);
-	return mm->total_vm;
+	*shared = mm_pages_to_reader(mm, current->mm, *shared);
+	*text = mm_pages_to_reader(mm, current->mm, *text);
+	*data = mm_pages_to_reader(mm, current->mm, *data);
+	*resident = mm_pages_to_reader(mm, current->mm, *resident);
+	return mm_pages_to_reader(mm, current->mm, mm->total_vm);
 }
 
 #ifdef CONFIG_NUMA
@@ -962,6 +966,7 @@ static void smaps_account(struct mem_size_stats *mss, struct page *page,
 	int i, nr = compound ? compound_nr(page) : 1;
 	unsigned long page_size = compound ? PAGE_SIZE_KERNEL : PAGE_SIZE;
 	unsigned long size = nr * page_size;
+	unsigned long pss_size = nr * PAGE_SIZE_KERNEL;
 	bool exclusive;
 	int mapcount;
 
@@ -1000,7 +1005,8 @@ static void smaps_account(struct mem_size_stats *mss, struct page *page,
 	 * pages referenced by migration entries, even with the PTL held.
 	 */
 	if (folio_ref_count(folio) == 1 || !present) {
-		smaps_page_accumulate(mss, folio, size, size << PSS_SHIFT,
+		smaps_page_accumulate(mss, folio, size,
+				      (present ? pss_size : size) << PSS_SHIFT,
 				      dirty, locked, present);
 		return;
 	}
@@ -1016,7 +1022,14 @@ static void smaps_account(struct mem_size_stats *mss, struct page *page,
 	 * mapcount atomically.
 	 */
 	for (i = 0; i < nr; i++, page++) {
-		unsigned long pss = page_size << PSS_SHIFT;
+		/*
+		 * P3S counts every slice PTE in the native page's mapcount.
+		 * Divide native backing bytes by that count, not logical PTE
+		 * bytes: four private 4K PTEs collectively own one 16K page.
+		 * RSS and private/shared sizes still describe mapped bytes.
+		 * A lone slice can therefore have PSS greater than its RSS.
+		 */
+		unsigned long pss = PAGE_SIZE_KERNEL << PSS_SHIFT;
 
 		if (IS_ENABLED(CONFIG_PAGE_MAPCOUNT)) {
 			mapcount = folio_precise_page_mapcount(folio, page);

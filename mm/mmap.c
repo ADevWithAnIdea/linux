@@ -1767,7 +1767,7 @@ __latent_entropy int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 		if (vma_test(mpnt, VMA_ACCOUNT_BIT)) {
 			unsigned long len = vma_pages(mpnt);
 
-			if (security_vm_enough_memory_mm(oldmm, len)) /* sic */
+			if (security_vm_enough_memory_mm_private(oldmm, len)) /* sic */
 				goto fail_nomem;
 			charge = len;
 		}
