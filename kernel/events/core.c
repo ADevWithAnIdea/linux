@@ -7446,6 +7446,10 @@ static int perf_mmap(struct file *file, struct vm_area_struct *vma)
 	mapped_f mapped;
 	int ret;
 
+	/* The ring/AUX mappers and their unwind paths walk native pages. */
+	if (vma_is_p3s_4k(vma))
+		return -EOPNOTSUPP;
+
 	/*
 	 * Don't allow mmap() of inherited per-task counters. This would
 	 * create a performance issue due to all children writing to the
