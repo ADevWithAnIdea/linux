@@ -49,7 +49,6 @@
 #include "swap_table.h"
 #include "internal.h"
 #include "swap.h"
-#include <linux/p3s_user_pages.h>
 
 static void swap_range_alloc(struct swap_info_struct *si,
 			     unsigned int nr_entries);
@@ -2593,7 +2592,7 @@ static int unuse_pte_range(struct vm_area_struct *vma, pmd_t *pmd,
 		folio_free_swap(folio);
 		folio_unlock(folio);
 		folio_put(folio);
-	} while (addr += PAGE_SIZE, addr != end);
+	} while (addr += mm_pte_size(vma->vm_mm), addr != end);
 
 	if (pte)
 		pte_unmap(pte);
@@ -2608,10 +2607,10 @@ static inline int unuse_pmd_range(struct vm_area_struct *vma, pud_t *pud,
 	unsigned long next;
 	int ret;
 
-	pmd = pmd_offset(pud, addr);
+	pmd = mm_pmd_offset(vma->vm_mm, pud, addr);
 	do {
 		cond_resched();
-		next = pmd_addr_end(addr, end);
+		next = mm_pmd_addr_end(vma->vm_mm, addr, end);
 		ret = unuse_pte_range(vma, pmd, addr, next, type);
 		if (ret)
 			return ret;
@@ -2671,7 +2670,7 @@ static int unuse_vma(struct vm_area_struct *vma, unsigned int type)
 
 	pgd = pgd_offset(vma->vm_mm, addr);
 	do {
-		next = pgd_addr_end(addr, end);
+		next = mm_pgd_addr_end(vma->vm_mm, addr, end);
 		if (pgd_none_or_clear_bad(pgd))
 			continue;
 		ret = unuse_p4d_range(vma, pgd, addr, next, type);

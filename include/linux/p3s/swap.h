@@ -67,6 +67,14 @@ static inline int p3s_convert_swap_header(union swap_header *swap_header)
 	if (!page_shift_delta)
 		return 0;
 
+	/*
+	 * read_swap_header() bounds nr_badpages only after this conversion,
+	 * and for a kernel page sized header: bound it before badpages[] is
+	 * accessed.
+	 */
+	if (nr_badpages > p3s_swap_header_max_badpages(swap_header))
+		return -EINVAL;
+
 	nr_pages = ((u64)swap_header->info.last_page + 1) >> page_shift_delta;
 	if (!nr_pages) {
 		pr_warn("Empty swap-file\n");
