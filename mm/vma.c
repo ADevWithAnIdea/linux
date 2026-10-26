@@ -1195,7 +1195,13 @@ static struct vm_area_struct *vma_merge_copied_range(struct vma_merge_struct *vm
 	VM_WARN_ON_VMG(!vmg->middle, vmg);
 
 	vmg->copied_from = vmg->middle;
-	vmg->slice_off = vma_slice_off(vmg->middle);
+	/*
+	 * The slice at the start of the copied range, not at the source VMA's
+	 * start: the range may begin anywhere in it. mremap keeps the new
+	 * address congruent to the old one modulo the host page, as
+	 * copy_vma_set_range() relies on too.
+	 */
+	vmg->slice_off = vma_slice_offset(vmg->middle, vmg->start);
 	vmg->middle = NULL;
 	return vma_merge_new_range(vmg);
 }
