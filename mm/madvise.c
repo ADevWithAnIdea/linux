@@ -526,10 +526,16 @@ restart:
 		 * Do not interfere with other mappings of this folio and
 		 * non-LRU folio. If we have a large folio at this point, we
 		 * know it is fully mapped so if its mapcount is the same as its
-		 * number of pages, it must be exclusive.
+		 * number of pages, it must be exclusive. A small folio of a 4KB
+		 * VMA has one mapping per slice PTE; it is exclusive to us if
+		 * they are all in this slice window. Its first slice isolates
+		 * it, and the others then find it off the LRU.
 		 */
-		if (!folio_test_lru(folio) ||
-		    folio_mapcount(folio) != folio_nr_pages(folio))
+		if (!folio_test_lru(folio))
+			continue;
+		if (folio_mapcount(folio) != folio_nr_pages(folio) &&
+		    !(p3s_folio_mapped_by_slices(vma, folio) &&
+		      p3s_folio_slices_in_window(vma, folio, addr, pte)))
 			continue;
 
 		if (pageout_anon_only_filter && !folio_test_anon(folio))
