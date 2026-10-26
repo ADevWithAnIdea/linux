@@ -4883,6 +4883,10 @@ static unsigned long thp_swapin_suitable_orders(struct vm_fault *vmf)
 	if (unlikely(userfaultfd_armed(vma)))
 		return 0;
 
+	/* 4K slice PTEs cannot describe a large folio's native pages. */
+	if (vma_is_p3s_4k(vma))
+		return 0;
+
 	/*
 	 * A large swapped out folio could be partially or fully in zswap. We
 	 * lack handling for such cases, so fallback to swapping in order-0
@@ -5125,7 +5129,9 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 	page_idx = 0;
 	address = vmf->address;
 	ptep = vmf->pte;
-	if (folio_test_large(folio) && folio_test_swapcache(folio)) {
+	/* A 4K process maps 4K slices; this batch steps in native pages. */
+	if (folio_test_large(folio) && folio_test_swapcache(folio) &&
+	    !vma_is_p3s_4k(vma)) {
 		int nr = folio_nr_pages(folio);
 		unsigned long idx = folio_page_idx(folio, page);
 		unsigned long folio_start = address - idx * PAGE_SIZE;
@@ -5193,6 +5199,13 @@ check_folio:
 		 * same exclusiveness. Checking just one PTE is fine.
 		 */
 		exclusive = pte_swp_exclusive(vmf->orig_pte);
+		/*
+		 * The 4K slice PTEs of a native page share its swap entry, and
+		 * only one of them carries the exclusive marker. Map the slice
+		 * shared; a write goes through the P3S reuse/COW path.
+		 */
+		if (vma_is_p3s_4k(vma))
+			exclusive = false;
 		if (exclusive)
 			check_swap_exclusive(folio, entry, nr_pages);
 		if (folio != swapcache) {

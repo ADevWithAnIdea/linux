@@ -2489,7 +2489,8 @@ static int unuse_pte(struct vm_area_struct *vma, pmd_t *pmd,
 		 * call and have the folio locked.
 		 */
 		VM_BUG_ON_FOLIO(folio_test_writeback(folio), folio);
-		if (pte_swp_exclusive(old_pte))
+		/* As in do_swap_page(), 4K slices share the exclusive marker. */
+		if (pte_swp_exclusive(old_pte) && !vma_is_p3s_4k(vma))
 			rmap_flags |= RMAP_EXCLUSIVE;
 		/*
 		 * We currently only expect small !anon folios, which are either
