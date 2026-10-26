@@ -363,13 +363,18 @@ unsigned long page_mapped_in_vma(const struct page *page,
 		.pfn = page_to_pfn(page),
 		.nr_pages = 1,
 		.vma = vma,
+		.pgoff = pgoff,
+		.pgoff_is_anon = folio_test_anon(folio),
 		.flags = PVMW_SYNC,
 	};
 
-	if (folio_test_anon(folio))
+	if (folio_test_anon(folio)) {
 		pvmw.address = vma_anon_address(vma, pgoff, 1);
-	else
+		/* A 4KB VMA maps the slices of the page's window. */
+		p3s_anon_rmap_skip(vma, folio, &pvmw.address);
+	} else {
 		pvmw.address = vma_filebacked_address(vma, pgoff, 1);
+	}
 	if (pvmw.address == -EFAULT)
 		goto out;
 	if (!page_vma_mapped_walk(&pvmw))

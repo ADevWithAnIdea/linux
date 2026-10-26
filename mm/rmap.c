@@ -938,7 +938,7 @@ static bool folio_referenced_one(struct folio *folio,
 			pra->mapcount--;
 
 			/* Only mlock fully mapped pages */
-			if (pvmw.pte && ptes != pvmw.nr_pages)
+			if (pvmw.pte && ptes != vma_folio_nr_ptes(vma, folio))
 				continue;
 
 			/*
@@ -1521,8 +1521,8 @@ static void __page_check_anon_rmap(const struct folio *folio,
 	 */
 	VM_BUG_ON_FOLIO(folio_anon_vma(folio)->root != vma->anon_vma->root,
 			folio);
-	VM_BUG_ON_PAGE(page_pgoff(folio, page) !=
-		       linear_anon_page_index(vma, address), page);
+	VM_BUG_ON_PAGE(!vma_anon_index_matches(vma, page_pgoff(folio, page),
+					       address), page);
 }
 
 static __always_inline void __folio_add_anon_rmap(struct folio *folio,
@@ -2180,8 +2180,10 @@ static bool ttu_anon_swapbacked_folio(struct vm_area_struct *vma,
 	mm_prepare_for_swap_entries(mm);
 	dec_mm_counter(mm, MM_ANONPAGES);
 	inc_mm_counter(mm, MM_SWAPENTS);
+	/* The slices of a small folio share its swap entry: none is exclusive. */
 	set_pte_at(mm, address, ptep,
-		   swp_pte_prepare(entry, pteval, anon_exclusive));
+		   swp_pte_prepare(entry, pteval, anon_exclusive &&
+				   !p3s_folio_mapped_by_slices(vma, folio)));
 	return true;
 }
 
@@ -2263,7 +2265,7 @@ static bool try_to_unmap_one(struct folio *folio, struct vm_area_struct *vma,
 			ret = false;
 
 			/* Only mlock fully mapped pages */
-			if (pvmw.pte && ptes != pvmw.nr_pages)
+			if (pvmw.pte && ptes != vma_folio_nr_ptes(vma, folio))
 				continue;
 
 			/*
@@ -2328,6 +2330,12 @@ static bool try_to_unmap_one(struct folio *folio, struct vm_area_struct *vma,
 		}
 
 		page = folio_page(folio, pfn - folio_pfn(folio));
+
+		/* See p3s_folio_slices_in_window(). */
+		if (folio_test_anon(folio) && PageAnonExclusive(page) &&
+		    !(flags & TTU_HWPOISON) &&
+		    !p3s_folio_slices_in_window(vma, folio, address, pvmw.pte))
+			goto walk_abort;
 
 		if (likely(pte_present(pteval))) {
 			nr_pages = folio_unmap_pte_batch(folio, &pvmw, flags, pteval);
@@ -2413,9 +2421,10 @@ finish_unmap:
 
 		/*
 		 * If we are sure that we batched the entire folio and cleared
-		 * all PTEs, we can just optimize and stop right here.
+		 * all PTEs, we can just optimize and stop right here. Other slice
+		 * PTEs of a 4KB VMA may still map the folio.
 		 */
-		if (nr_pages == folio_nr_pages(folio))
+		if (nr_pages == folio_nr_pages(folio) && !vma_is_p3s_4k(vma))
 			goto walk_done;
 		continue;
 walk_abort:
@@ -2584,6 +2593,12 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 		subpage = folio_page(folio, pfn - folio_pfn(folio));
 		anon_exclusive = folio_test_anon(folio) &&
 				 PageAnonExclusive(subpage);
+		if (anon_exclusive &&
+		    !p3s_folio_slices_in_window(vma, folio, address, pvmw.pte)) {
+			ret = false;
+			page_vma_mapped_walk_done(&pvmw);
+			break;
+		}
 
 		if (folio_test_hugetlb(folio)) {
 			bool anon = folio_test_anon(folio);
@@ -2666,8 +2681,9 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 			writable = softleaf_is_device_private_write(entry);
 		}
 
+		/* The other slices of a 4KB VMA stay writable while being unmapped. */
 		VM_WARN_ON_FOLIO(writable && folio_test_anon(folio) &&
-				!anon_exclusive, folio);
+				!anon_exclusive && !vma_is_p3s_4k(vma), folio);
 
 		/* Update high watermark before we lower rss */
 		update_hiwater_rss(mm);
@@ -3018,6 +3034,21 @@ out:
 }
 
 /*
+ * The VMAs of one anon_vma tree all belong to fork-related mms, which share
+ * one page-table geometry, so any of them tells whether the tree is 4KB.
+ */
+static inline bool p3s_anon_vma_is_4k(struct anon_vma *anon_vma)
+{
+	struct rb_node *node;
+
+	if (!IS_ENABLED(CONFIG_ARM64_PER_PROCESS_PAGE_SIZE))
+		return false;
+	node = rb_first_cached(&anon_vma->rb_root);
+	return node &&
+	       vma_is_p3s_4k(rb_entry(node, struct anon_vma_chain, rb)->vma);
+}
+
+/*
  * rmap_walk_anon - do something to anonymous page using the object-based
  * rmap method
  * @folio: the folio to be handled
@@ -3052,11 +3083,16 @@ static void rmap_walk_anon(struct folio *folio,
 
 	pgoff_start = folio_pgoff(folio);
 	pgoff_end = pgoff_start + folio_nr_pages(folio) - 1;
+	/* A small folio's slices may have moved to neighbouring VMAs. */
+	if (!folio_test_large(folio) && p3s_anon_vma_is_4k(anon_vma))
+		p3s_anon_rmap_range(folio, &pgoff_start, &pgoff_end);
 	anon_rmap_tree_foreach(avc, anon_vma, pgoff_start, pgoff_end) {
 		struct vm_area_struct *vma = avc->vma;
-		const unsigned long address = vma_anon_address(vma, pgoff_start,
+		unsigned long address = vma_anon_address(vma, folio_pgoff(folio),
 				folio_nr_pages(folio));
 
+		if (p3s_anon_rmap_skip(vma, folio, &address))
+			continue;
 		VM_WARN_ON_ONCE_VMA(address == -EFAULT, vma);
 		cond_resched();
 

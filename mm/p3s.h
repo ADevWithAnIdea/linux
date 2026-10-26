@@ -506,7 +506,231 @@ static inline bool p3s_wp_install_folio_slices(struct folio *new_folio,
 	return true;
 }
 
+
+/*
+ * vma_anon_slice_window - First address of the slices of a page in @vma
+ * @vma: 4KB compatibility COW VMA
+ * @pgoff: Anonymous index of a small folio, in 4KB pages
+ *
+ * The slices of a small anonymous folio are mapped within one host-page
+ * window, aligned to the slice phase of the VMA (the virtual address for
+ * anonymous VMAs, the file slice for private file mappings). A VMA split or
+ * a 4KB mremap() can leave some of them in a VMA whose page range does not
+ * contain @pgoff; unsigned wrap-around then gives an address below vm_start,
+ * and the slice arithmetic stays modular. Returns the first address of the
+ * window within @vma, or -EFAULT if @vma holds no part of it.
+ */
+static inline unsigned long vma_anon_slice_window(const struct vm_area_struct *vma,
+						  pgoff_t pgoff)
+{
+	unsigned long addr = vma->vm_start +
+			     ((pgoff - vma_start_anon_pgoff(vma)) << PAGE_SHIFT_4KB);
+	unsigned long win = addr -
+			    ((unsigned long)vma_slice_offset(vma, addr) << PAGE_SHIFT_4KB);
+
+	if (win >= vma->vm_end || win + PAGE_SIZE_KERNEL <= vma->vm_start)
+		return -EFAULT;
+	return max(win, vma->vm_start);
+}
+
+/*
+ * vma_slice_walk_end - End of an rmap walk for a small folio from @addr
+ * @vma: Pointer to struct vm_area_struct
+ * @addr: Virtual address within @vma
+ *
+ * For 4KB compatibility VMAs, the end of the slice window at @addr within
+ * @vma, so that the walk visits every slice PTE that can map the folio.
+ * One page past @addr for other VMAs.
+ */
+static inline unsigned long vma_slice_walk_end(const struct vm_area_struct *vma,
+					       unsigned long addr)
+{
+	unsigned long off;
+
+	if (!vma_is_p3s_4k(vma))
+		return addr + vma_page_size(vma);
+
+	off = (unsigned long)vma_slice_offset(vma, addr) << PAGE_SHIFT_4KB;
+	addr &= PAGE_MASK_4KB;
+	return addr + min(PAGE_SIZE_KERNEL - off, vma->vm_end - addr);
+}
+
+/*
+ * p3s_anon_rmap_range - Widen the anon_vma lookup of @folio to its window
+ * @folio: Folio being walked
+ * @start: First page offset to look up
+ * @end: Last page offset to look up
+ *
+ * A small folio in a 4KB VMA can be mapped from the four slices of one
+ * host-page window, and a VMA split or a 4KB mremap() can leave some of them
+ * in a VMA whose page range does not contain the folio's index. Look up
+ * every page offset of the window.
+ */
+static inline void p3s_anon_rmap_range(const struct folio *folio,
+				       pgoff_t *start, pgoff_t *end)
+{
+	if (folio_test_large(folio))
+		return;
+	*start -= min_t(pgoff_t, *start, P3S_SLICE_MASK);
+	*end += P3S_SLICE_MASK;
+}
+
+/*
+ * p3s_anon_rmap_skip - Check whether an anon rmap walk of @folio skips @vma
+ * @vma: VMA found by the lookup that p3s_anon_rmap_range() widened
+ * @folio: Folio being walked
+ * @address: vma_anon_address() of @folio in @vma; the start of the walk on
+ *           return
+ *
+ * In a 4KB VMA the walk starts at the first address of @folio's window in
+ * @vma. Returns true for a VMA that holds no part of the window, which the
+ * widened lookup can find in any mm, and for which vma_anon_address() of a
+ * native VMA failed.
+ */
+static inline bool p3s_anon_rmap_skip(const struct vm_area_struct *vma,
+				      const struct folio *folio,
+				      unsigned long *address)
+{
+	if (folio_test_large(folio))
+		return false;
+	if (vma_is_p3s_4k(vma))
+		*address = vma_anon_slice_window(vma, folio_pgoff(folio));
+	return *address == -EFAULT;
+}
+
+/*
+ * p3s_folio_mapped_by_slices - Check if other slice PTEs may map @folio
+ * @vma: Pointer to struct vm_area_struct
+ * @folio: Folio mapped by a PTE of @vma
+ *
+ * True for a small folio of a 4KB VMA with more than one mapping. Its slices
+ * share one swap entry, so none of their swap PTEs may be exclusive.
+ */
+static inline bool p3s_folio_mapped_by_slices(const struct vm_area_struct *vma,
+					      const struct folio *folio)
+{
+	return vma_is_p3s_4k(vma) && !folio_test_large(folio) &&
+	       folio_mapcount(folio) > 1;
+}
+
+/*
+ * p3s_folio_slices_in_window - Check that all mappings of @folio are here
+ * @vma: Pointer to struct vm_area_struct
+ * @folio: Folio about to be unmapped by reclaim or migration
+ * @addr: Address of a PTE in @vma that maps @folio
+ * @pte: That PTE, mapped and locked
+ *
+ * A 4KB compatibility task can map a small anonymous folio with several
+ * slice PTEs, all covered by its one PageAnonExclusive flag. Unmapping the
+ * first of them clears the flag (folio_try_share_anon_rmap_pte()), so the
+ * other slices must be unmapped in the same walk: a slice left mapped
+ * writable would reference a page that is no longer exclusive. Returns
+ * true if every mapping of @folio is a PTE in the slice window at @addr,
+ * which the walk covers under the page table lock it already holds.
+ */
+static inline bool p3s_folio_slices_in_window(struct vm_area_struct *vma,
+					      struct folio *folio,
+					      unsigned long addr, pte_t *pte)
+{
+	unsigned int nr_slices;
+	unsigned long start;
+
+	if (!p3s_folio_mapped_by_slices(vma, folio))
+		return true;
+
+	vma_folio_slice_bounds(vma, addr, &nr_slices, &start);
+	return p3s_count_folio_slices(vma,
+				      pte - ((addr - start) >> PAGE_SHIFT_4KB),
+				      start, nr_slices, folio) ==
+	       folio_mapcount(folio);
+}
+
+/*
+ * vma_folio_nr_ptes - Number of PTEs that map all of @folio in @vma
+ * @vma: Pointer to struct vm_area_struct
+ * @folio: Folio mapped by @vma
+ *
+ * The rmap walks mlock a large folio only once they have counted this many
+ * PTEs in a VM_LOCKED VMA. A 4KB VMA maps each page of the folio with four
+ * PTEs, one per slice. A small folio is still mlocked on its first PTE.
+ */
+static inline unsigned long vma_folio_nr_ptes(const struct vm_area_struct *vma,
+					      const struct folio *folio)
+{
+	if (vma_is_p3s_4k(vma) && folio_test_large(folio))
+		return folio_nr_pages(folio) << P3S_SLICE_SHIFT;
+	return folio_nr_pages(folio);
+}
+
+/*
+ * vma_anon_index_matches - Check an anonymous page's index against @addr
+ * @vma: Pointer to struct vm_area_struct
+ * @pgoff: Anonymous index of the page (page_pgoff())
+ * @addr: Virtual address the page is mapped at
+ *
+ * In a 4KB VMA, the index of a small folio is that of the slice that faulted
+ * first, and its other slices are mapped in the same window, so compare the
+ * windows. Elsewhere the index must match exactly.
+ */
+static inline bool vma_anon_index_matches(const struct vm_area_struct *vma,
+					  pgoff_t pgoff, unsigned long addr)
+{
+	unsigned long first;
+
+	if (!vma_is_p3s_4k(vma))
+		return pgoff == linear_anon_page_index(vma, addr);
+
+	first = vma->vm_start +
+		((pgoff - vma_start_anon_pgoff(vma)) << PAGE_SHIFT_4KB);
+	addr &= PAGE_MASK_4KB;
+	return first - ((unsigned long)vma_slice_offset(vma, first) << PAGE_SHIFT_4KB) ==
+	       addr - ((unsigned long)vma_slice_offset(vma, addr) << PAGE_SHIFT_4KB);
+}
+
 #else /* !CONFIG_ARM64_PER_PROCESS_PAGE_SIZE */
+
+static inline unsigned long vma_slice_walk_end(const struct vm_area_struct *vma,
+					       unsigned long addr)
+{
+	return addr + PAGE_SIZE;
+}
+
+static inline void p3s_anon_rmap_range(const struct folio *folio,
+				       pgoff_t *start, pgoff_t *end)
+{
+}
+
+static inline bool p3s_anon_rmap_skip(const struct vm_area_struct *vma,
+				      const struct folio *folio,
+				      unsigned long *address)
+{
+	return *address == -EFAULT;
+}
+
+static inline bool p3s_folio_mapped_by_slices(const struct vm_area_struct *vma,
+					      const struct folio *folio)
+{
+	return false;
+}
+
+static inline bool p3s_folio_slices_in_window(struct vm_area_struct *vma,
+					      struct folio *folio,
+					      unsigned long addr, pte_t *pte)
+{
+	return true;
+}
+
+static inline unsigned long vma_folio_nr_ptes(const struct vm_area_struct *vma,
+					      const struct folio *folio)
+{
+	return folio_nr_pages(folio);
+}
+
+static inline bool vma_anon_index_matches(const struct vm_area_struct *vma,
+					  pgoff_t pgoff, unsigned long addr)
+{
+	return pgoff == linear_anon_page_index(vma, addr);
+}
 
 static inline void p3s_anon_install_folio(struct vm_area_struct *vma,
 					  struct vm_fault *vmf,

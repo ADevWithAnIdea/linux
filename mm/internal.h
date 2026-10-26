@@ -1092,10 +1092,14 @@ static inline unsigned long vma_address_end(struct page_vma_mapped_walk *pvmw)
 	pgoff_t pgoff_vma_start;
 	unsigned long address;
 
-	/* File folios may span several 4K PTEs; KSM has no valid pgoff. */
+	/*
+	 * File folios may span several 4K PTEs; KSM has no valid pgoff. A small
+	 * anonymous folio of a 4KB VMA can be mapped by every slice of its
+	 * window.
+	 */
 	if (pvmw->nr_pages == 1 &&
 	    (pvmw->pgoff_is_anon || !vma_is_p3s_4k(vma)))
-		return pvmw->address + vma_page_size(vma);
+		return vma_slice_walk_end(vma, pvmw->address);
 
 	if (pvmw->pgoff_is_anon) {
 		pgoff_vma_start = vma_start_anon_pgoff(vma);
