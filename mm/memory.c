@@ -4949,6 +4949,80 @@ static void check_swap_exclusive(struct folio *folio, swp_entry_t entry,
 }
 
 /*
+ * p3s_swapin_map_sibling_slices - Restore the slices swapped out with a folio
+ * @vmf: Fault information, with the page table lock held
+ * @folio: Folio that do_swap_page() just mapped at the faulting address, locked
+ * @entry: Swap entry of the faulting PTE
+ * @rmap_flags: The rmap flags of the faulting slice
+ *
+ * In a 4KB compatibility VMA the slices of a 16KB window share one small
+ * anonymous folio, and reclaim replaced every PTE that mapped it with a swap
+ * PTE for @entry. Restore the siblings with the faulting slice; otherwise
+ * their swap PTEs keep @folio shared and each write copies its slice into a
+ * new folio:
+ *
+ *             slice 0   slice 1   slice 2   slice 3
+ *           ┌─────────┬─────────┬─────────┬─────────┐
+ *  before   │ swap E  │ swap E  │  none   │ swap E  │  fault on slice 1
+ *           ├─────────┼─────────┼─────────┼─────────┤
+ *  after    │  F[0]   │  F[1]   │  none   │  F[3]   │  F: @folio, E: @entry
+ *           └─────────┴─────────┴─────────┴─────────┘
+ *
+ * Each restored slice drops its swap reference, so that do_swap_page() can
+ * then free the swap cache. It keeps the soft-dirty and uffd bits of its swap
+ * PTE and is mapped old where the architecture wants that for prefaulted
+ * PTEs, as fault-around does.
+ */
+static void p3s_swapin_map_sibling_slices(struct vm_fault *vmf,
+					  struct folio *folio, softleaf_t entry,
+					  rmap_t rmap_flags)
+{
+	struct vm_area_struct *vma = vmf->vma;
+	struct page *page = folio_page(folio, 0);
+	unsigned int nr_slices, i;
+	unsigned long start;
+	pte_t *pte_base;
+
+	if (!vma_is_p3s_4k(vma) || folio_test_large(folio) ||
+	    folio_test_ksm(folio) || !folio_test_swapcache(folio))
+		return;
+
+	vma_folio_slice_bounds(vma, vmf->address, &nr_slices, &start);
+	pte_base = vmf->pte - ((vmf->address - start) >> PAGE_SHIFT_4KB);
+	for (i = 0; i < nr_slices; i++) {
+		unsigned long addr = start + (i << PAGE_SHIFT_4KB);
+		pte_t orig_pte = ptep_get(pte_base + i);
+		pte_t pte;
+
+		if (pte_base + i == vmf->pte || pte_none(orig_pte) ||
+		    pte_present(orig_pte) ||
+		    softleaf_from_pte(orig_pte).val != entry.val)
+			continue;
+
+		pte = vma_pte_add_slice(vma, addr,
+					mk_pte(page, vma->vm_page_prot));
+		if (pte_swp_soft_dirty(orig_pte))
+			pte = pte_mksoft_dirty(pte);
+		if (pte_swp_uffd(orig_pte))
+			pte = pte_mkuffd(pte);
+		/* As for the faulting PTE: keep an RWP-protected slice trapping. */
+		if (pte_swp_uffd(orig_pte) && userfaultfd_rwp(vma))
+			pte = pte_modify(pte, PAGE_NONE);
+		if (arch_wants_old_prefaulted_pte())
+			pte = pte_mkold(pte);
+
+		folio_get(folio);
+		folio_add_anon_rmap_ptes(folio, page, 1, vma, addr, rmap_flags);
+		folio_put_swap(folio, page);
+		add_mm_counter(vma->vm_mm, MM_ANONPAGES, 1);
+		add_mm_counter(vma->vm_mm, MM_SWAPENTS, -1);
+		set_pte_at(vma->vm_mm, addr, pte_base + i, pte);
+		arch_do_swap_page_nr(vma->vm_mm, vma, addr, pte, pte, 1);
+		update_mmu_cache_range(vmf, vma, addr, pte_base + i, 1);
+	}
+}
+
+/*
  * We enter with either the VMA lock or the mmap_lock held (see
  * FAULT_FLAG_VMA_LOCK), and pte mapped but not yet locked.
  * We return with pte unmapped and unlocked.
@@ -5312,6 +5386,9 @@ check_folio:
 	set_ptes(vma->vm_mm, address, ptep, pte, nr_pages);
 	arch_do_swap_page_nr(vma->vm_mm, vma, address,
 			pte, pte, nr_pages);
+	/* 4KB compatibility VMAs: restore the slices swapped out with the folio */
+	if (folio == swapcache)
+		p3s_swapin_map_sibling_slices(vmf, folio, entry, rmap_flags);
 
 	/*
 	 * Remove the swap entry and conditionally try to free up the swapcache.
