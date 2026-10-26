@@ -23,6 +23,8 @@ unsigned long __get_unmapped_area(struct file *file, unsigned long addr,
  * @map_flags: MAP_* flags for get_unmapped_area
  * @old_addr: Source address being remapped
  * @mremap_flags: MREMAP_* flags (e.g. MREMAP_FIXED, MREMAP_DONTUNMAP)
+ * @reslice: The source is private anonymous memory that p3s_mremap_prepare()
+ *           and p3s_mremap_reslice() can move to another slice
  *
  * For 4KB compat processes on a 16KB kernel, a VMA may start at a non-zero
  * subpage slice offset within a host 16KB folio ((old_addr >> 12) & 3 != 0).
@@ -54,11 +56,17 @@ unsigned long __get_unmapped_area(struct file *file, unsigned long addr,
  * which aligns heap/shadow ranges to >= 2 MiB PMD boundaries, and
  * MemMap::ReplaceWith which operates on top-level 16KB-aligned mmap() base
  * addresses) always satisfy (old_addr ^ addr) & ~PAGE_MASK_KERNEL == 0.
+ *
+ * Private anonymous memory (@reslice) may move to any slice: the move copies
+ * the slices of each destination window into a new folio, and refuses pinned
+ * source folios (p3s_mremap_prepare()). FEX's 32-bit allocator and code cache
+ * do such MREMAP_FIXED moves at 4KB granularity. A MREMAP_DONTUNMAP hint is
+ * likewise used as is only at the source slice, unless @reslice.
  */
 static inline unsigned long mm_mremap_get_unmapped_area(struct file *file,
 		unsigned long addr, unsigned long len, unsigned long pgoff,
 		unsigned long map_flags, unsigned long old_addr,
-		unsigned long mremap_flags)
+		unsigned long mremap_flags, bool reslice)
 {
 	if (mm_is_p3s_4k(current->mm)) {
 		unsigned int slice =
@@ -66,7 +74,7 @@ static inline unsigned long mm_mremap_get_unmapped_area(struct file *file,
 		bool same_slice = !((old_addr ^ addr) & ~PAGE_MASK_KERNEL);
 
 		if (mremap_flags & MREMAP_FIXED) {
-			if (!same_slice)
+			if (!same_slice && !reslice)
 				return -EINVAL;
 		} else if (slice || (addr && !same_slice)) {
 			unsigned long res;
@@ -74,10 +82,10 @@ static inline unsigned long mm_mremap_get_unmapped_area(struct file *file,
 			/*
 			 * MREMAP_DONTUNMAP treats a non-zero destination as an
 			 * mmap-style hint. Honor an available hint at the
-			 * source slice before adding padding to preserve the
-			 * source address slice.
+			 * source slice (any slice if it can be resliced) before
+			 * adding padding to preserve the source address slice.
 			 */
-			if (addr && same_slice) {
+			if (addr && (same_slice || reslice)) {
 				res = __get_unmapped_area(file, addr, len,
 							  pgoff, map_flags, EMPTY_VMA_FLAGS);
 				if (res == addr || IS_ERR_VALUE(res))
