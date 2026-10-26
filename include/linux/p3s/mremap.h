@@ -63,19 +63,21 @@ static inline unsigned long mm_mremap_get_unmapped_area(struct file *file,
 	if (mm_is_p3s_4k(current->mm)) {
 		unsigned int slice =
 			(old_addr >> PAGE_SHIFT_4KB) & P3S_SLICE_MASK;
+		bool same_slice = !((old_addr ^ addr) & ~PAGE_MASK_KERNEL);
 
 		if (mremap_flags & MREMAP_FIXED) {
-			if ((old_addr ^ addr) & ~PAGE_MASK_KERNEL)
+			if (!same_slice)
 				return -EINVAL;
-		} else if (slice) {
+		} else if (slice || (addr && !same_slice)) {
 			unsigned long res;
 
 			/*
 			 * MREMAP_DONTUNMAP treats a non-zero destination as an
-			 * mmap-style hint. Honor an available hint before adding
-			 * padding to preserve the source address slice.
+			 * mmap-style hint. Honor an available hint at the
+			 * source slice before adding padding to preserve the
+			 * source address slice.
 			 */
-			if (addr) {
+			if (addr && same_slice) {
 				res = __get_unmapped_area(file, addr, len,
 							  pgoff, map_flags, EMPTY_VMA_FLAGS);
 				if (res == addr || IS_ERR_VALUE(res))
@@ -85,8 +87,9 @@ static inline unsigned long mm_mremap_get_unmapped_area(struct file *file,
 			res = __get_unmapped_area(file, addr,
 						  len + PAGE_SIZE_KERNEL,
 						  pgoff, map_flags, EMPTY_VMA_FLAGS);
+			/* The first address in the padded area at the source slice */
 			if (!IS_ERR_VALUE(res))
-				res += (unsigned long)slice << PAGE_SHIFT_4KB;
+				res += (old_addr - res) & ~PAGE_MASK_KERNEL;
 			return res;
 		}
 	}
