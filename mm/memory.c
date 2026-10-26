@@ -7358,11 +7358,18 @@ int generic_access_phys(struct vm_area_struct *vma, unsigned long addr,
 	bool writable;
 	struct follow_pfnmap_args args = { .vma = vma, .address = addr };
 
+	/*
+	 * A 4K mapping's PTE carries a slice of the native frame that the pfn
+	 * below does not; refuse rather than access the wrong physical address.
+	 */
+	if (vma_is_p3s_4k(vma))
+		return -EINVAL;
+
 retry:
 	if (follow_pfnmap_start(&args))
 		return -EINVAL;
 	prot = args.pgprot;
-	phys_addr = (resource_size_t)args.pfn << PAGE_SHIFT;
+	phys_addr = (resource_size_t)args.pfn << PAGE_SHIFT_KERNEL;
 	writable = args.writable;
 	follow_pfnmap_end(&args);
 
@@ -7377,7 +7384,7 @@ retry:
 		goto out_unmap;
 
 	if ((pgprot_val(prot) != pgprot_val(args.pgprot)) ||
-	    (phys_addr != (args.pfn << PAGE_SHIFT)) ||
+	    (phys_addr != ((resource_size_t)args.pfn << PAGE_SHIFT_KERNEL)) ||
 	    (writable != args.writable)) {
 		follow_pfnmap_end(&args);
 		iounmap(maddr);
