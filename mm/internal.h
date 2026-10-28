@@ -65,6 +65,8 @@ void lru_add_drain_cpu_zone(struct zone *zone);
 void folio_deactivate(struct folio *folio);
 void folio_mark_lazyfree(struct folio *folio);
 
+#include "p3s.h"
+
 /* mm/vmscan.c */
 unsigned long zone_reclaimable_pages(struct zone *zone);
 unsigned long try_to_free_pages(struct zonelist *zonelist, int order,
@@ -713,7 +715,7 @@ void set_recommended_min_free_kbytes(void);
 /*
  * in mm/page_alloc.c
  */
-#define K(x) ((x) << (PAGE_SHIFT-10))
+#define K(x) ((x) << (PAGE_SHIFT_KERNEL - 10))
 
 extern char * const zone_names[MAX_NR_ZONES];
 
@@ -933,7 +935,8 @@ static inline bool
 folio_within_range(struct folio *folio, struct vm_area_struct *vma,
 		unsigned long start, unsigned long end)
 {
-	const unsigned long vma_pglen = vma_pages(vma);
+	const unsigned long vma_pglen = folio_test_anon(folio) ?
+		vma_pages(vma) : vma_native_pages(vma);
 	pgoff_t pgoff_folio, pgoff_vma_start;
 	unsigned long addr;
 
@@ -955,7 +958,9 @@ folio_within_range(struct folio *folio, struct vm_area_struct *vma,
 	if (!in_range(pgoff_folio, pgoff_vma_start, vma_pglen))
 		return false;
 
-	addr = vma->vm_start + ((pgoff_folio - pgoff_vma_start) << PAGE_SHIFT);
+	addr = folio_test_anon(folio) ? vma->vm_start +
+		((pgoff_folio - pgoff_vma_start) << mm_pte_shift(vma->vm_mm)) :
+		vma_pgoff_to_address(vma, pgoff_folio);
 
 	return !(addr < start || end - addr < folio_size(folio));
 }
@@ -1016,13 +1021,15 @@ void mlock_drain_remote(int cpu);
 extern pmd_t maybe_pmd_mkwrite(pmd_t pmd, struct vm_area_struct *vma);
 
 static inline unsigned long __vma_address(const struct vm_area_struct *vma,
-		pgoff_t pgoff, pgoff_t pgoff_start, unsigned long nr_pages)
+		pgoff_t pgoff, pgoff_t pgoff_start, unsigned long nr_pages,
+		bool is_anon)
 {
 	unsigned long address;
 
 	if (pgoff >= pgoff_start) {
-		address = vma->vm_start +
-			((pgoff - pgoff_start) << PAGE_SHIFT);
+		address = is_anon ? vma->vm_start +
+			((pgoff - pgoff_start) << mm_pte_shift(vma->vm_mm)) :
+			vma_pgoff_to_address(vma, pgoff);
 		/* Check for address beyond vma (or wrapped through 0?) */
 		if (address < vma->vm_start || address >= vma->vm_end)
 			address = -EFAULT;
@@ -1050,7 +1057,7 @@ static inline unsigned long vma_filebacked_address(const struct vm_area_struct *
 {
 	VM_WARN_ON_ONCE(vma_is_anonymous(vma));
 
-	return __vma_address(vma, pgoff, vma_start_pgoff(vma), nr_pages);
+	return __vma_address(vma, pgoff, vma_start_pgoff(vma), nr_pages, false);
 }
 
 /**
@@ -1070,7 +1077,8 @@ static inline unsigned long vma_anon_address(const struct vm_area_struct *vma,
 {
 	VM_WARN_ON_ONCE(!vma_is_cow_mapping(vma));
 
-	return __vma_address(vma, pgoff_anon, vma_start_anon_pgoff(vma), nr_pages);
+	return __vma_address(vma, pgoff_anon, vma_start_anon_pgoff(vma),
+			     nr_pages, true);
 }
 
 /*
@@ -1084,17 +1092,22 @@ static inline unsigned long vma_address_end(struct page_vma_mapped_walk *pvmw)
 	pgoff_t pgoff_vma_start;
 	unsigned long address;
 
-	/* Common case, plus ->pgoff is invalid for KSM */
-	if (pvmw->nr_pages == 1)
-		return pvmw->address + PAGE_SIZE;
+	/*
+	 * File folios may span several 4K PTEs; KSM has no valid pgoff. A small
+	 * anonymous folio of a 4KB VMA can be mapped by every slice of its
+	 * window.
+	 */
+	if (pvmw->nr_pages == 1 &&
+	    (pvmw->pgoff_is_anon || !vma_is_p3s_4k(vma)))
+		return vma_slice_walk_end(vma, pvmw->address);
 
-	if (pvmw->pgoff_is_anon)
+	if (pvmw->pgoff_is_anon) {
 		pgoff_vma_start = vma_start_anon_pgoff(vma);
-	else
-		pgoff_vma_start = vma_start_pgoff(vma);
-
-	address = vma->vm_start +
-		((pgoff_end - pgoff_vma_start) << PAGE_SHIFT);
+		address = vma->vm_start +
+			((pgoff_end - pgoff_vma_start) << mm_pte_shift(vma->vm_mm));
+	} else {
+		address = vma_pgoff_to_address(vma, pgoff_end);
+	}
 	/* Check for address beyond vma (or wrapped through 0?) */
 	if (address < vma->vm_start || address > vma->vm_end)
 		address = vma->vm_end;

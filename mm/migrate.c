@@ -388,6 +388,11 @@ static bool remove_migration_pte(struct folio *folio,
 		folio_get(folio);
 		new = folio_page(folio, idx);
 		pte = mk_pte(new, READ_ONCE(vma->vm_page_prot));
+		if (vma_is_p3s_4k(vma))
+			pte = pte_advance_phys(pte,
+				(unsigned long)vma_slice_offset(vma, pvmw.address) <<
+				PAGE_SHIFT_4KB);
+
 		if (!softleaf_is_migration_young(entry))
 			pte = pte_mkold(pte);
 		if (folio_test_dirty(folio) && softleaf_is_migration_dirty(entry))

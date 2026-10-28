@@ -38,6 +38,7 @@
 
 #include "internal.h"
 #include "swap.h"
+#include <linux/p3s_user_pages.h>
 
 #define __MADV_SET_ANON_VMA_NAME (-1)
 
@@ -245,7 +246,7 @@ static void shmem_swapin_range(struct vm_area_struct *vma,
 		struct address_space *mapping)
 {
 	XA_STATE(xas, &mapping->i_pages, linear_page_index(vma, start));
-	pgoff_t end_index = linear_page_index(vma, end) - 1;
+	pgoff_t end_index = linear_page_index(vma, end - 1);
 	struct folio *folio;
 	struct swap_io_ctx ctx = {};
 
@@ -261,8 +262,7 @@ static void shmem_swapin_range(struct vm_area_struct *vma,
 		if (!softleaf_is_swap(entry))
 			continue;
 
-		addr = vma->vm_start +
-			((xas.xa_index - vma_start_pgoff(vma)) << PAGE_SHIFT);
+		addr = vma_pgoff_to_address(vma, xas.xa_index);
 		xas_pause(&xas);
 		rcu_read_unlock();
 
@@ -326,8 +326,7 @@ static long madvise_willneed(struct madvise_behavior *madv_behavior)
 	 */
 	mark_mmap_lock_dropped(madv_behavior);
 	get_file(file);
-	offset = (loff_t)(start - vma->vm_start)
-			+ ((loff_t)vma_start_pgoff(vma) << PAGE_SHIFT);
+	offset = vma_file_offset_at(vma, start);
 	mmap_read_unlock(mm);
 	vfs_fadvise(file, offset, end - start, POSIX_FADV_WILLNEED);
 	fput(file);
@@ -527,10 +526,16 @@ restart:
 		 * Do not interfere with other mappings of this folio and
 		 * non-LRU folio. If we have a large folio at this point, we
 		 * know it is fully mapped so if its mapcount is the same as its
-		 * number of pages, it must be exclusive.
+		 * number of pages, it must be exclusive. A small folio of a 4KB
+		 * VMA has one mapping per slice PTE; it is exclusive to us if
+		 * they are all in this slice window. Its first slice isolates
+		 * it, and the others then find it off the LRU.
 		 */
-		if (!folio_test_lru(folio) ||
-		    folio_mapcount(folio) != folio_nr_pages(folio))
+		if (!folio_test_lru(folio))
+			continue;
+		if (folio_mapcount(folio) != folio_nr_pages(folio) &&
+		    !(p3s_folio_mapped_by_slices(vma, folio) &&
+		      p3s_folio_slices_in_window(vma, folio, addr, pte)))
 			continue;
 
 		if (pageout_anon_only_filter && !folio_test_anon(folio))
@@ -1030,8 +1035,7 @@ static long madvise_remove(struct madvise_behavior *madv_behavior)
 	if (!vma_is_shared_maywrite(vma))
 		return -EACCES;
 
-	offset = (loff_t)(start - vma->vm_start)
-			+ ((loff_t)vma_start_pgoff(vma) << PAGE_SHIFT);
+	offset = vma_file_offset_at(vma, start);
 
 	/*
 	 * Filesystem's fallocate may need to take i_rwsem.  We need to
@@ -1191,7 +1195,7 @@ static long madvise_guard_install(struct madvise_behavior *madv_behavior)
 
 		if (err == 0) {
 			unsigned long nr_expected_pages =
-				PHYS_PFN(range->end - range->start);
+				(range->end - range->start) >> PAGE_SHIFT;
 
 			VM_WARN_ON(nr_pages != nr_expected_pages);
 			return 0;
@@ -2027,6 +2031,7 @@ SYSCALL_DEFINE3(madvise, unsigned long, start, size_t, len_in, int, behavior)
 static ssize_t vector_madvise(struct mm_struct *mm, struct iov_iter *iter,
 			      int behavior)
 {
+	P3S_CONTEXT_REMOTE_MM(mm);
 	ssize_t ret = 0;
 	size_t total_len;
 	struct mmu_gather tlb;

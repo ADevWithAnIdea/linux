@@ -31,6 +31,7 @@
 #include <asm/tlb.h>
 
 #include "internal.h"
+#include <linux/p3s_user_pages.h>
 
 /* Classify the kind of remap operation being performed. */
 enum mremap_type {
@@ -684,6 +685,9 @@ static bool can_realign_addr(struct pagetable_move_control *pmc,
 	unsigned long pagetable_size = align_mask + 1;
 	unsigned long old_align_next = pagetable_size - old_align;
 
+	if (pmc->for_stack)
+		return false;
+
 	/*
 	 * We don't want to have to go hunting for VMAs from the end of the old
 	 * VMA to the next page table boundary, also we want to make sure the
@@ -957,7 +961,7 @@ static unsigned long vrm_set_new_addr(struct vma_remap_struct *vrm)
 	struct vm_area_struct *vma = vrm->vma;
 	unsigned long map_flags = 0;
 	/* Page Offset _into_ the VMA. */
-	const pgoff_t pgoff = linear_page_index(vma, vrm->addr);
+	const pgoff_t pgoff = vma_pgoff_offset(vma, vrm->addr);
 	unsigned long new_addr = vrm_implies_new_addr(vrm) ? vrm->new_addr : 0;
 	unsigned long res;
 
@@ -966,8 +970,9 @@ static unsigned long vrm_set_new_addr(struct vma_remap_struct *vrm)
 	if (vma_test(vma, VMA_MAYSHARE_BIT))
 		map_flags |= MAP_SHARED;
 
-	res = get_unmapped_area(vma->vm_file, new_addr, vrm->new_len, pgoff,
-				map_flags);
+	res = mm_mremap_get_unmapped_area(vma->vm_file, new_addr, vrm->new_len,
+					  pgoff, map_flags, vrm->addr,
+					  vrm->flags, p3s_mremap_can_reslice(vma));
 	if (IS_ERR_VALUE(res))
 		return res;
 
@@ -999,7 +1004,7 @@ static bool vrm_calc_charge(struct vma_remap_struct *vrm)
 
 
 	/* This accounts 'charged' pages of memory. */
-	if (security_vm_enough_memory_mm(current->mm, charged))
+	if (security_vm_enough_memory_mm_private(current->mm, charged))
 		return false;
 
 	vrm->charged = charged;
@@ -1295,11 +1300,12 @@ static void unmap_source_vma(struct vma_remap_struct *vrm)
 static int copy_vma_and_data(struct vma_remap_struct *vrm,
 			     struct vm_area_struct **new_vma_ptr)
 {
-	const pgoff_t new_pgoff = linear_page_index(vrm->vma, vrm->addr);
+	const pgoff_t new_pgoff = vma_pgoff_offset(vrm->vma, vrm->addr);
 	const pgoff_t new_anon_pgoff =
 		__linear_anon_page_index(vrm->vma, vrm->addr);
 	struct vm_area_struct *vma = vrm->vma;
 	struct vm_area_struct *new_vma;
+	struct p3s_mremap_ctx *p3s_ctx;
 	unsigned long moved_len;
 	int err = 0;
 	PAGETABLE_MOVE(pmc, NULL, NULL, vrm->addr, vrm->new_addr, vrm->old_len);
@@ -1320,11 +1326,35 @@ static int copy_vma_and_data(struct vma_remap_struct *vrm,
 	pmc.old = vma;
 	pmc.new = new_vma;
 
-	moved_len = move_page_tables(&pmc);
-	if (moved_len < vrm->old_len)
-		err = -ENOMEM;
-	else if (vma->vm_ops && vma->vm_ops->mremap)
-		err = vma->vm_ops->mremap(new_vma);
+	/*
+	 * A 4KB anonymous range moving to other slices is repacked after. Its
+	 * folios are locked without waiting for all but the first: retry a
+	 * few times before failing the call over a transiently held lock.
+	 */
+	for (int tries = 0; ; tries++) {
+		p3s_ctx = p3s_mremap_prepare(vma, new_vma, vrm->addr,
+					     vrm->new_addr, vrm->old_len);
+		if (PTR_ERR_OR_ZERO(p3s_ctx) != -EAGAIN || tries == 8)
+			break;
+		cond_resched();
+	}
+	if (PTR_ERR_OR_ZERO(p3s_ctx) == -EAGAIN)
+		pr_warn_ratelimited("%s (%d): mremap: 4KB slice move gave up on busy folios\n",
+				    current->comm, current->pid);
+	if (IS_ERR(p3s_ctx)) {
+		err = PTR_ERR(p3s_ctx);
+		p3s_ctx = NULL;
+		moved_len = 0;
+	} else {
+		moved_len = move_page_tables(&pmc);
+		if (moved_len < vrm->old_len)
+			err = -ENOMEM;
+		else if (vma->vm_ops && vma->vm_ops->mremap)
+			err = vma->vm_ops->mremap(new_vma);
+		if (!err)
+			p3s_mremap_reslice(p3s_ctx, new_vma, vrm->new_addr,
+					   vrm->old_len);
+	}
 
 	if (unlikely(err)) {
 		PAGETABLE_MOVE(pmc_revert, new_vma, vma, vrm->new_addr,
@@ -1345,6 +1375,7 @@ static int copy_vma_and_data(struct vma_remap_struct *vrm,
 		mremap_userfaultfd_prep(new_vma, vrm->uf);
 	}
 
+	p3s_mremap_finish(p3s_ctx);
 	fixup_hugetlb_reservations(vma);
 
 	*new_vma_ptr = new_vma;

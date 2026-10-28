@@ -194,7 +194,7 @@ struct signal_struct {
 	unsigned long nvcsw, nivcsw, cnvcsw, cnivcsw;
 	unsigned long min_flt, maj_flt, cmin_flt, cmaj_flt;
 	unsigned long inblock, oublock, cinblock, coublock;
-	unsigned long maxrss, cmaxrss;
+	unsigned long maxrss, cmaxrss; /* KiB; mm geometry can change on exec */
 	struct task_io_accounting ioac;
 
 	/*

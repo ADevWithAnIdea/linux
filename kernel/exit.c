@@ -945,7 +945,7 @@ void __noreturn do_exit(long code)
 		exit_itimers(tsk);
 #endif
 		if (tsk->mm)
-			setmax_mm_hiwater_rss(&tsk->signal->maxrss, tsk->mm);
+			setmax_mm_hiwater_rss_kb(&tsk->signal->maxrss, tsk->mm);
 	}
 	acct_collect(code, group_dead);
 	if (group_dead)

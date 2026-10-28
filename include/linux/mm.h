@@ -3396,7 +3396,7 @@ int __account_locked_vm(struct mm_struct *mm, unsigned long pages, bool inc,
 			const struct task_struct *task, bool bypass_rlim);
 
 struct kvec;
-struct page *get_dump_page(unsigned long addr, int *locked);
+struct page *get_dump_page(unsigned long addr, int *locked, unsigned long *page_offset);
 
 bool folio_mark_dirty(struct folio *folio);
 bool folio_mark_dirty_lock(struct folio *folio);
@@ -3515,6 +3515,16 @@ static inline unsigned long get_mm_rss_sum(struct mm_struct *mm)
 		get_mm_counter_sum(mm, MM_SHMEMPAGES);
 }
 
+/* Same backing granularity as totalram_pages()/total_swap_pages. */
+static inline unsigned long get_mm_oom_pages(struct mm_struct *mm)
+{
+#ifdef CONFIG_ARM64_PER_PROCESS_PAGE_SIZE
+	if (mm_is_p3s_4k(mm))
+		return max(atomic_long_read(&mm->p3s_oom_pages), 0L);
+#endif
+	return get_mm_rss_sum(mm) + get_mm_counter_sum(mm, MM_SWAPENTS);
+}
+
 static inline unsigned long get_mm_hiwater_rss(struct mm_struct *mm)
 {
 	return max(mm->hiwater_rss, get_mm_rss(mm));
@@ -3544,10 +3554,10 @@ static inline void reset_mm_hiwater_rss(struct mm_struct *mm)
 	mm->hiwater_rss = get_mm_rss(mm);
 }
 
-static inline void setmax_mm_hiwater_rss(unsigned long *maxrss,
+static inline void setmax_mm_hiwater_rss_kb(unsigned long *maxrss,
 					 struct mm_struct *mm)
 {
-	unsigned long hiwater_rss = get_mm_hiwater_rss(mm);
+	unsigned long hiwater_rss = mm_pages_to_kb(mm, get_mm_hiwater_rss(mm));
 
 	if (*maxrss < hiwater_rss)
 		*maxrss = hiwater_rss;
@@ -3710,8 +3720,8 @@ static inline pud_t *pud_alloc(struct mm_struct *mm, p4d_t *p4d,
 
 static inline pmd_t *pmd_alloc(struct mm_struct *mm, pud_t *pud, unsigned long address)
 {
-	return (unlikely(pud_none(*pud)) && __pmd_alloc(mm, pud, address))?
-		NULL: pmd_offset(pud, address);
+	return (unlikely(pud_none(*pud)) && __pmd_alloc(mm, pud, address)) ?
+		NULL : mm_pmd_offset(mm, pud, address);
 }
 #endif /* CONFIG_MMU */
 
@@ -4217,6 +4227,8 @@ void anon_rmap_tree_verify(struct anon_vma_chain *avc);
 
 /* mmap.c */
 extern int __vm_enough_memory(const struct mm_struct *mm, long pages, int cap_sys_admin);
+int __vm_enough_memory_private(const struct mm_struct *mm, long pages,
+			       int cap_sys_admin);
 extern void exit_mmap(struct mm_struct *);
 bool mmap_read_lock_maybe_expand(struct mm_struct *mm, struct vm_area_struct *vma,
 				 unsigned long addr, bool write);
@@ -4395,7 +4407,7 @@ static inline unsigned long vm_end_gap(const struct vm_area_struct *vma)
 
 static inline unsigned long vma_pages(const struct vm_area_struct *vma)
 {
-	return (vma->vm_end - vma->vm_start) >> PAGE_SHIFT;
+	return (vma->vm_end - vma->vm_start) >> mm_pte_shift(vma->vm_mm);
 }
 
 /**
@@ -4436,7 +4448,7 @@ static inline pgoff_t vma_start_pgoff(const struct vm_area_struct *vma)
  */
 static inline pgoff_t vma_end_pgoff(const struct vm_area_struct *vma)
 {
-	return vma_start_pgoff(vma) + vma_pages(vma);
+	return vma_start_pgoff(vma) + vma_native_pages(vma);
 }
 
 /**

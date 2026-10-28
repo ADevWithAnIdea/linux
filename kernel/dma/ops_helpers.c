@@ -37,11 +37,14 @@ int dma_common_mmap(struct device *dev, struct vm_area_struct *vma,
 		unsigned long attrs)
 {
 #ifdef CONFIG_MMU
-	unsigned long user_count = vma_pages(vma);
+	unsigned long user_count = DIV_ROUND_UP(vma_size(vma), PAGE_SIZE);
 	unsigned long count = PAGE_ALIGN(size) >> PAGE_SHIFT;
 	unsigned long off = vma_start_pgoff(vma);
 	struct page *page = dma_common_vaddr_to_page(cpu_addr);
 	int ret = -ENXIO;
+
+	if (vma_is_p3s_4k(vma))
+		return -ENXIO;
 
 	vma->vm_page_prot = dma_pgprot(dev, vma->vm_page_prot, attrs);
 
@@ -53,7 +56,7 @@ int dma_common_mmap(struct device *dev, struct vm_area_struct *vma,
 
 	return remap_pfn_range(vma, vma->vm_start,
 			page_to_pfn(page) + vma_start_pgoff(vma),
-			user_count << PAGE_SHIFT, vma->vm_page_prot);
+			vma_size(vma), vma->vm_page_prot);
 #else
 	return -ENXIO;
 #endif /* CONFIG_MMU */

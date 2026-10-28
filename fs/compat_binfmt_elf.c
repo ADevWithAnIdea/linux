@@ -151,4 +151,7 @@
 /*
  * We share all the actual code with the native (64-bit) version.
  */
+/* binfmt_elf.c includes its opt-in header after all its own headers. */
+#define P3S_USER_PAGES_C_WRAPPER
 #include "binfmt_elf.c"
+#undef P3S_USER_PAGES_C_WRAPPER
