@@ -29,7 +29,10 @@ properties:
           - apple,t8110-dart
           - apple,t6000-dart
       - items:
-          - const: apple,t6020-dart
+          - enum:
+              - apple,t6020-dart
+              - apple,t8122-dart
+              - apple,t8132-dart
           - const: apple,t8110-dart
 
   reg:
@@ -42,6 +45,14 @@ properties:
     description:
       Reference to the gate clock phandle if required for this IOMMU.
       Optional since not all IOMMUs are attached to a clock gate.
+
+  apple,dma-range:
+    $ref: /schemas/types.yaml#/definitions/uint64-array
+    minItems: 2
+    maxItems: 2
+    description:
+      Base and size of the usable device address aperture. Firmware may reserve
+      the remaining address space or configure bypass windows there.
 
   '#iommu-cells':
     const: 1

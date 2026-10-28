@@ -23,6 +23,7 @@ properties:
               - apple,t6030-pinctrl
               - apple,t6031-pinctrl
               - apple,t8122-pinctrl
+              - apple,t8132-pinctrl
           - const: apple,t8103-pinctrl
       - items:
           # Do not add additional SoC to this list.
@@ -85,6 +86,21 @@ patternProperties:
     required:
       - pinmux
 
+    additionalProperties: false
+
+  '-hog$':
+    type: object
+    description: GPIO hog node
+    properties:
+      gpio-hog: true
+      gpios: true
+      input: true
+      output-high: true
+      output-low: true
+      line-name: true
+    required:
+      - gpio-hog
+      - gpios
     additionalProperties: false
 
 allOf:
