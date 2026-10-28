@@ -6,6 +6,7 @@ LDLIBS += -static
 TEST_GEN_PROGS_EXTENDED := exec-4k test-4k test-futex-slice test-exec-slice test-accounting test-dma-mmap test-writeback test-perf-mmap test-usage test-taskstats test-oom-backing test-commit-limit test-commit-guess test-shm-lock test-reclaim
 
 TEST_FILES += test-memcg-first-victim.sh
+TEST_PROGS += test-include-guard.py
 
 include ../../lib.mk
 

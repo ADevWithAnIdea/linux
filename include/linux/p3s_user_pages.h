@@ -7,8 +7,13 @@
  * C source files (.c) that opt into dynamic PAGE_SIZE for user address
  * spaces. It must NEVER be included in header files (.h).
  */
+/* A .c implementation included by a .c wrapper has one extra include level.
+ * The wrapper opt-in still rejects inclusion through a header at that level.
+ */
 #if defined(__INCLUDE_LEVEL__) && __INCLUDE_LEVEL__ > 1
+#if __INCLUDE_LEVEL__ != 2 || !defined(P3S_USER_PAGES_C_WRAPPER)
 #error "Must not include <linux/p3s_user_pages.h> from header files"
+#endif
 #endif
 
 #include <linux/p3s.h>
