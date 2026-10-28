@@ -38,6 +38,10 @@ use core::{
 #[cfg(CONFIG_RUST_DRM_GEM_SHMEM_HELPER)]
 pub mod shmem;
 
+/// Owned GEM mapping interface retained for the Asahi firmware runtime.
+#[cfg(CONFIG_RUST_DRM_GEM_SHMEM_HELPER)]
+pub mod legacy_shmem;
+
 /// A macro for implementing [`AlwaysRefCounted`] for any GEM object type.
 ///
 /// Since all GEM objects use the same refcounting scheme.
