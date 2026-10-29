@@ -73,6 +73,7 @@ BRCMF_FW_CLM_DEF(4378B3, "brcmfmac4378b3-pcie");
 BRCMF_FW_CLM_DEF(4387C2, "brcmfmac4387c2-pcie");
 BRCMF_FW_CLM_DEF(4388B0, "brcmfmac4388b0-pcie");
 BRCMF_FW_CLM_DEF(4388C0, "brcmfmac4388c0-pcie");
+BRCMF_FW_CLM_DEF(4388C2, "brcmfmac4388c2-pcie");
 BRCMF_FW_CLM_DEF(54591, "brcmfmac54591-pcie");
 
 /* firmware config files */
@@ -115,6 +116,7 @@ static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
 	BRCMF_FW_ENTRY(BRCM_CC_4378_CHIP_ID, 0xFFFFFFE0, 4378B3), /* revision ID 5 */
 	BRCMF_FW_ENTRY(BRCM_CC_4387_CHIP_ID, 0xFFFFFFFF, 4387C2), /* revision ID 7 */
 	BRCMF_FW_ENTRY(BRCM_CC_4388_CHIP_ID, 0x0000000F, 4388B0),
+	BRCMF_FW_ENTRY(BRCM_CC_4388_CHIP_ID, BIT(6), 4388C2), /* revision ID 6 */
 	BRCMF_FW_ENTRY(BRCM_CC_4388_CHIP_ID, 0xFFFFFFF0, 4388C0), /* revision ID 4 */
 };
 
@@ -2887,7 +2889,8 @@ brcmf_pcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	bus->bus_priv.pcie = pcie_bus_dev;
 	bus->ops = &brcmf_pcie_bus_ops;
 	bus->proto_type = BRCMF_PROTO_MSGBUF;
-	bus->chip = devinfo->coreid;
+	bus->chip = devinfo->ci->chip;
+	bus->chiprev = devinfo->ci->chiprev;
 	bus->wowl_supported = pci_pme_capable(pdev, PCI_D3hot);
 	bus->fwvid = drvdata[id->driver_data].vendor;
 	devinfo->fwseed = drvdata[id->driver_data].fw_seed;

@@ -1909,21 +1909,6 @@ brcmf_set_key_mgmt(struct net_device *ndev, struct cfg80211_connect_params *sme)
 			else
 				profile->use_fwsup = BRCMF_PROFILE_FWSUP_ROAM;
 			break;
-		case WLAN_AKM_SUITE_WFA_DPP:
-			val = WFA_AUTH_DPP;
-			profile->use_fwsup = BRCMF_PROFILE_FWSUP_NONE;
-			break;
-		case WLAN_AKM_SUITE_OWE:
-			val = WPA3_AUTH_OWE;
-			profile->use_fwsup = BRCMF_PROFILE_FWSUP_ROAM;
-			break;
-		case WLAN_AKM_SUITE_8021X_SUITE_B_192:
-			val = WPA3_AUTH_1X_SUITE_B_SHA384;
-			if (sme->want_1x)
-				profile->use_fwsup = BRCMF_PROFILE_FWSUP_1X;
-			else
-				profile->use_fwsup = BRCMF_PROFILE_FWSUP_ROAM;
-			break;
 		default:
 			bphy_err(drvr, "invalid cipher group (%d)\n",
 				 sme->crypto.cipher_group);
