@@ -355,7 +355,7 @@ impl AFKEndpoint {
         // SAFETY: TODO
         let bound_dev = unsafe { dev.as_bound() };
         let iomem = Coherent::<u8>::zeroed_slice(bound_dev, size, GFP_KERNEL)?;
-        rtkit.send_message(self.index, AFK_MSG_GET_BUF_ACK | iomem.dma_handle())?;
+        rtkit.send_message(self.index, AFK_MSG_GET_BUF_ACK | iomem.dma_address())?;
         self.iomem = Some(iomem);
         Ok(())
     }
@@ -971,7 +971,6 @@ const HW_CFG_T6020: AopHwConfig = AopHwConfig {
 
 kernel::of_device_table!(
     OF_TABLE,
-    MODULE_OF_TABLE,
     <AopDriver as platform::Driver>::IdInfo,
     [
         (of::DeviceId::new(c_str!("apple,t8103-aop")), &HW_CFG_T8103),
