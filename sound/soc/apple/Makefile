@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
 
-snd-soc-aop-y		:= aop_audio.o
+snd-soc-aop-y		:= aop_audio.o aop_speaker.o
 obj-$(CONFIG_SND_SOC_APPLE_AOP_AUDIO)	+= snd-soc-aop.o
 
 snd-soc-apple-mca-y	:= mca.o
