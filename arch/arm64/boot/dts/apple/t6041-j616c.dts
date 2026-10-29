@@ -9,6 +9,7 @@
 #include "t6041-aop.dtsi"
 #include "t6041-audio.dtsi"
 #include "t6041-display.dtsi"
+#include "t6041-hdmi.dtsi"
 
 &aop_audio {
 	apple,chassis-name = "J616";

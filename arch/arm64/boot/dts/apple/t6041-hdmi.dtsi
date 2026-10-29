@@ -1,0 +1,74 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/* EXPERIMENTAL: J616c external controller, verified native 26.6.2 resources.
+ * The fixed HDMI link uses ATC PHY3, not the base M4's dedicated DPTX PHY.
+ */
+/ {
+	aliases {
+		dcpext0 = &dcpext0;
+		dispext0_piodma = &dispext0_piodma;
+	};
+};
+
+&{/soc} {
+	dispext0_dart: iommu@3a2300000 {
+		compatible = "apple,t6041-dart", "apple,t8110-dart";
+		reg = <3 0xa2300000 0 0xc000>;
+		#iommu-cells = <1>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 1165 IRQ_TYPE_LEVEL_HIGH>;
+	};
+
+	dcpext0_dart: iommu@3a2340000 {
+		compatible = "apple,t6041-dart", "apple,t8110-dart";
+		reg = <3 0xa2340000 0 0x20000>;
+		#iommu-cells = <1>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 1165 IRQ_TYPE_LEVEL_HIGH>;
+	};
+
+	dcpext0_mbox: mailbox@3a2e08000 {
+		compatible = "apple,t6041-asc-mailbox", "apple,asc-mailbox-v4";
+		reg = <3 0xa2e08000 0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 1218 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 1219 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 1220 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 1221 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "send-empty", "send-not-empty",
+				  "recv-empty", "recv-not-empty";
+		#mbox-cells = <0>;
+	};
+
+	dcpext0: dcp@3a2e00000 {
+		compatible = "apple,t6041-dcpext", "apple,dcpext";
+		#address-cells = <2>;
+		#size-cells = <2>;
+		mboxes = <&dcpext0_mbox>;
+		mbox-names = "mbox";
+		iommus = <&dcpext0_dart 23>;
+		reg-names = "coproc", "disp-0", "disp-1", "disp-2", "disp-3";
+		reg = <3 0xa2e00000 0 0x4000>,
+		      <3 0xa0000000 0 0x4000000>,
+		      <3 0xa2240000 0 0x10000>,
+		      <3 0xa23a8000 0 0x4000>,
+		      <3 0xa2800000 0 0x800000>;
+		/* Captured external D003 response: PMGR scratch 0x50482c000. */
+		apple,bw-scratch = <&pmgr_dcp 0 4 0x2c000>;
+		apple,dcp-index = <1>;
+		apple,dptx-phy = <3>;
+		apple,connector-type = "HDMI-A";
+		clocks = <&clkref>;
+		phandle = <&dcpext0>;
+		/* m1n1 supplies firmware reservations/version before enabling it. */
+		status = "disabled";
+
+		dispext0_piodma: piodma {
+			iommus = <&dispext0_dart 16>;
+			phandle = <&dispext0_piodma>;
+		};
+	};
+};
+
+&display {
+	iommus = <&disp0_dart 0>, <&dispext0_dart 0>;
+};

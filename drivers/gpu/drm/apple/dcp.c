@@ -1845,7 +1845,8 @@ static enum dcp_firmware_version dcp_check_firmware_version(struct device *dev)
 	/* M4-family protocols require this exact OS firmware release. */
 	if (of_device_is_compatible(dev->of_node, "apple,t8132-dcp") ||
 	    of_device_is_compatible(dev->of_node, "apple,t8132-dcpext") ||
-	    of_device_is_compatible(dev->of_node, "apple,t6041-dcp")) {
+	    of_device_is_compatible(dev->of_node, "apple,t6041-dcp") ||
+	    of_device_is_compatible(dev->of_node, "apple,t6041-dcpext")) {
 		if (ret >= 0 && !strcmp(fw_str, "26.6.2"))
 			return DCP_FIRMWARE_V_26_6;
 
