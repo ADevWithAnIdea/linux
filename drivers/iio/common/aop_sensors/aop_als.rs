@@ -133,7 +133,7 @@ impl platform::Driver for IIOAopAlsDriver {
             c"aop-sensors-als",
             ty,
             info_mask,
-            &THIS_MODULE,
+            kernel::module::this_module::<LocalModule>(),
         )?))
     }
 }
