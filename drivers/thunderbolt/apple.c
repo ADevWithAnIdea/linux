@@ -451,7 +451,9 @@ static void apple_nhi_ring_configure(struct tb_ring *ring, u32 flags, u32 e2e_fl
 
 		sof_eof_mask = ring->sof_mask << 16 | ring->eof_mask;
 		writel(sof_eof_mask, options + 4);
-		writel(sof_eof_mask, anhi->pdf_base + ring->hop * APPLE_CIO_NHI_PDF_STRIDE);
+		/* CIO v2 removed the separate packet-filter aperture. */
+		if (anhi->pdf_base)
+			writel(sof_eof_mask, anhi->pdf_base + ring->hop * APPLE_CIO_NHI_PDF_STRIDE);
 	}
 
 	/*
@@ -519,10 +521,15 @@ static int apple_nhi_probe(struct platform_device *pdev)
 	apple_tunable_apply(anhi->nhi_base, tunable);
 
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "pdf");
-	anhi->pdf_base = devm_ioremap_resource(&pdev->dev, res);
-	if (IS_ERR(anhi->pdf_base)) {
-		ret = dev_err_probe(&pdev->dev, PTR_ERR(anhi->pdf_base),
-				    "Unable to map PDF regs\n");
+	if (res) {
+		anhi->pdf_base = devm_ioremap_resource(&pdev->dev, res);
+		if (IS_ERR(anhi->pdf_base)) {
+			ret = dev_err_probe(&pdev->dev, PTR_ERR(anhi->pdf_base),
+					    "Unable to map PDF regs\n");
+			goto err;
+		}
+	} else if (!of_device_is_compatible(anhi->np, "apple,t6040-usb4-nhi")) {
+		ret = dev_err_probe(&pdev->dev, -EINVAL, "Missing PDF resource\n");
 		goto err;
 	}
 
