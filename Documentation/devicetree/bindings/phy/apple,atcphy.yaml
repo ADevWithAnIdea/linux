@@ -37,32 +37,54 @@ allOf:
       properties:
         reg:
           minItems: 4
-          maxItems: 4
           items:
             - description: Analog PHY core
             - description: PHY power and APB reset controls
             - description: PHY fabric clock controls
             - description: Common PHY controls
+            - description: CIO4 PHY firmware processor controls
+            - description: CIO4 PHY firmware data SRAM
         reg-names:
+          minItems: 4
           items:
             - const: core
             - const: power
             - const: fabric
             - const: common
+            - const: coproc
+            - const: sram
         power-domains:
           minItems: 4
           maxItems: 4
         "#reset-cells": false
-        orientation-switch: false
       required:
-        - apple,fixed-dp
         - power-domains
+      allOf:
+        - if:
+            required: ["apple,fixed-dp"]
+          then:
+            properties:
+              reg:
+                maxItems: 4
+              reg-names:
+                maxItems: 4
+              orientation-switch: false
+              mboxes: false
+          else:
+            properties:
+              reg:
+                minItems: 6
+              reg-names:
+                minItems: 6
+            required:
+              - orientation-switch
+              - mboxes
     else:
       properties:
         reg:
           minItems: 5
+          maxItems: 5
         reg-names:
-          minItems: 5
           items:
             - const: core
             - const: lpdptx
@@ -72,6 +94,7 @@ allOf:
         power-domains:
           maxItems: 1
       required:
+        - ports
         - "#reset-cells"
         - orientation-switch
         - power-domains
@@ -106,17 +129,17 @@ properties:
 
   reg:
     minItems: 1
-    maxItems: 5
     items:
       - description: Common controls for all PHYs (USB2/3/4, DisplayPort, TBT)
       - description: DisplayPort Alternate Mode PHY specific controls
       - description: Type-C PHY AXI to Apple Fabric interconnect controls
       - description: USB2 PHY specific controls
-      - description: USB3 PIPE interface controls
+      - description: USB3 PIPE interface controls or CIO4 processor controls
+      - description: CIO4 firmware data SRAM
 
   reg-names:
     minItems: 1
-    maxItems: 5
+    maxItems: 6
 
   "#phy-cells":
     const: 1
@@ -137,6 +160,26 @@ properties:
   power-domains:
     minItems: 1
     maxItems: 4
+
+  mboxes:
+    maxItems: 1
+    description: RTKit mailbox for the CIO4 PHY processor.
+
+  port:
+    $ref: /schemas/graph.yaml#/properties/port
+    description: Connection to the Type-C connector on a CIO4 USB4-only port.
+
+  apple,tunable-cio4-fabric:
+    $ref: "#/$defs/apple,tunable"
+    description: CIO4 fabric calibration, applied to the fabric region.
+
+  apple,tunable-cio4-common:
+    $ref: "#/$defs/apple,tunable"
+    description: CIO4 common calibration, applied to the common region.
+
+  apple,tunable-cio4-analog:
+    $ref: "#/$defs/apple,tunable"
+    description: CIO4 board calibration, applied to the analog core region.
 
   ports:
     $ref: /schemas/graph.yaml#/properties/ports
@@ -211,7 +254,10 @@ required:
   - reg-names
   - "#phy-cells"
   - mode-switch
-  - ports
+
+anyOf:
+  - required: [ports]
+  - required: [port]
 
 additionalProperties: false
 
