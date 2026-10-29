@@ -971,7 +971,6 @@ const HW_CFG_T6020: AopHwConfig = AopHwConfig {
 
 kernel::of_device_table!(
     OF_TABLE,
-    MODULE_OF_TABLE,
     <AopDriver as platform::Driver>::IdInfo,
     [
         (of::DeviceId::new(c_str!("apple,t8103-aop")), &HW_CFG_T8103),
