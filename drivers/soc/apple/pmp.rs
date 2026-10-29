@@ -397,8 +397,7 @@ struct PmpDriver(Arc<PmpData>);
 
 kernel::of_device_table!(
     OF_TABLE,
-    MODULE_OF_TABLE,
-    (),
+    <PmpDriver as platform::Driver>::IdInfo,
     [(of::DeviceId::new(c"apple,t6000-pmp-v2"), ())]
 );
 

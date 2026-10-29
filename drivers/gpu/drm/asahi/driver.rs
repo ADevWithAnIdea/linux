@@ -113,7 +113,6 @@ impl drm::driver::Driver for AsahiDrmDriver {
 // OF Device ID table.s
 kernel::of_device_table!(
     OF_TABLE,
-    MODULE_OF_TABLE,
     <AsahiPlatformDriver as platform::Driver>::IdInfo,
     [
         (of::DeviceId::new(c"apple,agx-t8103"), &hw::t8103::HWCONFIG),
