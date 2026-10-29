@@ -28,8 +28,7 @@ struct IIOAopLasDriver(IIORegistration<MsgProc>);
 
 kernel::of_device_table!(
     OF_TABLE,
-    MODULE_OF_TABLE,
-    (),
+    <IIOAopLasDriver as platform::Driver>::IdInfo,
     [(of::DeviceId::new(c_str!("apple,aop-las")), ())]
 );
 
