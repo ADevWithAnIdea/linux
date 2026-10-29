@@ -1,0 +1,49 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/* EXPERIMENTAL: J616c left-rear port (ATC0), native ADT resources.
+ * Keep HPM1/ATC1 unbound: it carries the development USB transport.
+ */
+#include <dt-bindings/spmi/spmi.h>
+
+&pmgr3 {
+	ps_nub_spmi_a0: power-controller@68 {
+		compatible = "apple,t6041-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x68 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "nub_spmi_a0";
+		apple,always-on;
+	};
+};
+
+&{/soc} {
+	nub_spmi_a0: spmi@509188000 {
+		compatible = "apple,t6041-spmi", "apple,t8103-spmi";
+		reg = <5 0x09188000 0 0x4000>;
+		#address-cells = <2>;
+		#size-cells = <0>;
+		#interrupt-cells = <2>;
+		interrupt-controller;
+		interrupt-parent = <&aic>;
+		/* ADT IRQ256 is local notify; IRQ866 is its AIC aggregate. */
+		interrupts = <AIC_IRQ 866 IRQ_TYPE_LEVEL_HIGH>;
+		power-domains = <&ps_nub_spmi_a0>;
+
+		hpm0: usb-pd@c {
+			compatible = "apple,sn201202x";
+			reg = <0xc SPMI_USID>;
+			interrupts = <11 IRQ_TYPE_EDGE_RISING>,
+				     <13 IRQ_TYPE_EDGE_RISING>,
+				     <17 IRQ_TYPE_EDGE_RISING>,
+				     <19 IRQ_TYPE_EDGE_RISING>;
+			interrupt-names = "irq", "select", "sleep", "wake";
+
+			typec0: connector {
+				label = "USB-C Left-back";
+				compatible = "usb-c-connector";
+				power-role = "dual";
+				data-role = "dual";
+				try-power-role = "sink";
+			};
+		};
+	};
+};
