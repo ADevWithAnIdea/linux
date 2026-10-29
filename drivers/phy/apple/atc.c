@@ -34,6 +34,7 @@
 #include <linux/of_device.h>
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
+#include <linux/pm_domain.h>
 #include <linux/reset-controller.h>
 #include <linux/soc/apple/tunable.h>
 #include <linux/types.h>
@@ -539,6 +540,7 @@ enum atcphy_lane_mode {
 enum atcphy_generation {
 	ATCPHY_GENERATION_T8103,
 	ATCPHY_GENERATION_T8122,
+	ATCPHY_GENERATION_T6040,
 };
 
 enum atcphy_dp_link_rate {
@@ -691,6 +693,9 @@ struct apple_atcphy {
 		void __iomem *pipehandler;
 		void __iomem *pipe_clocks;
 		void __iomem *lpdptx;
+		void __iomem *cio4_power;
+		void __iomem *cio4_fabric;
+		void __iomem *cio4_common;
 	} regs;
 
 	struct {
@@ -2313,8 +2318,25 @@ static const struct phy_ops apple_atc_usb3_phy_ops = {
 	.set_mode = atcphy_usb3_set_mode,
 };
 
+#include "atc-t6040-dp.h"
+
 static int atcphy_dpphy_set_mode(struct phy *phy, enum phy_mode mode, int submode)
 {
+	struct apple_atcphy *atcphy = phy_get_drvdata(phy);
+
+	if (atcphy->hw->gen == ATCPHY_GENERATION_T6040) {
+		guard(mutex)(&atcphy->lock);
+		if (mode == PHY_MODE_DP && !submode)
+			return t6040_dp_enable(atcphy);
+		if (mode == PHY_MODE_INVALID) {
+			core_set32(atcphy, 0x7000, BIT(0));
+			atcphy->mode = APPLE_ATCPHY_MODE_OFF;
+			atcphy->dp_link_rate = -1;
+			return 0;
+		}
+		return -EINVAL;
+	}
+
 	/* Nothing to do here since the setup already happened in mux_set */
 	if (mode == PHY_MODE_DP && submode == 0)
 		return 0;
@@ -2353,6 +2375,9 @@ static int atcphy_dpphy_configure(struct phy *phy, union phy_configure_opts *opt
 	struct phy_configure_opts_dp *opts = &opts_->dp;
 	struct apple_atcphy *atcphy = phy_get_drvdata(phy);
 	enum atcphy_dp_link_rate link_rate;
+
+	if (atcphy->hw->gen == ATCPHY_GENERATION_T6040)
+		return t6040_dp_configure(atcphy, opts);
 
 	if (atcphy->hw->t8130)
 		return t8130_dp_configure(atcphy, opts);
@@ -2402,9 +2427,9 @@ static struct phy *atcphy_xlate(struct device *dev, const struct of_phandle_args
 
 	switch (args->args[0]) {
 	case PHY_TYPE_USB2:
-		return atcphy->phys.usb2;
+		return atcphy->phys.usb2 ?: ERR_PTR(-ENODEV);
 	case PHY_TYPE_USB3:
-		return atcphy->phys.usb3;
+		return atcphy->phys.usb3 ?: ERR_PTR(-ENODEV);
 	case PHY_TYPE_DP:
 		return atcphy->phys.dp;
 	}
@@ -2423,6 +2448,9 @@ static int atcphy_probe_phy(struct apple_atcphy *atcphy)
 	};
 
 	for (int i = 0; i < ARRAY_SIZE(phys); i++) {
+		if (atcphy->hw->gen == ATCPHY_GENERATION_T6040 &&
+		    phys[i].phy != &atcphy->phys.dp)
+			continue;
 		*phys[i].phy = devm_phy_create(atcphy->dev, NULL, phys[i].ops);
 		if (IS_ERR(*phys[i].phy))
 			return PTR_ERR(*phys[i].phy);
@@ -2573,6 +2601,13 @@ static int atcphy_mux_set(struct typec_mux_dev *mux, struct typec_mux_state *sta
 
 	guard(mutex)(&atcphy->lock);
 
+	if (atcphy->hw->gen == ATCPHY_GENERATION_T6040) {
+		if (state->alt && state->alt->svid == USB_TYPEC_DP_SID &&
+		    (state->mode == TYPEC_DP_STATE_C || state->mode == TYPEC_DP_STATE_E))
+			return t6040_dp_enable(atcphy);
+		return -EOPNOTSUPP;
+	}
+
 	if (state->mode == TYPEC_STATE_SAFE) {
 		target_mode = APPLE_ATCPHY_MODE_OFF;
 	} else if (state->mode == TYPEC_STATE_USB) {
@@ -2702,6 +2737,9 @@ static int atcphy_load_tunables(struct apple_atcphy *atcphy)
 		{ "apple,tunable-lane0-dp", &atcphy->tunables.lane_dp[0], atcphy->res.core },
 		{ "apple,tunable-lane1-dp", &atcphy->tunables.lane_dp[1], atcphy->res.core },
 	};
+	/* Fixed CIO4 DP bring-up preserves iBoot's device calibration. */
+	if (atcphy->hw->gen == ATCPHY_GENERATION_T6040)
+		return 0;
 	if (atcphy->hw->t8130) {
 		static const char * const names[] = {
 			"apple,dp-drive-settings", "apple,dp-drive-settings-hbr2",
@@ -2767,6 +2805,24 @@ static int atcphy_map_resources(struct platform_device *pdev, struct apple_atcph
 	struct resource *res;
 	void __iomem *addr;
 
+	if (atcphy->hw->gen == ATCPHY_GENERATION_T6040) {
+		res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "core");
+		atcphy->regs.core = devm_ioremap_resource(&pdev->dev, res);
+		if (IS_ERR(atcphy->regs.core))
+			return PTR_ERR(atcphy->regs.core);
+		atcphy->res.core = res;
+		atcphy->regs.cio4_power = devm_platform_ioremap_resource_byname(pdev, "power");
+		if (IS_ERR(atcphy->regs.cio4_power))
+			return PTR_ERR(atcphy->regs.cio4_power);
+		atcphy->regs.cio4_fabric = devm_platform_ioremap_resource_byname(pdev, "fabric");
+		if (IS_ERR(atcphy->regs.cio4_fabric))
+			return PTR_ERR(atcphy->regs.cio4_fabric);
+		atcphy->regs.cio4_common = devm_platform_ioremap_resource_byname(pdev, "common");
+		if (IS_ERR(atcphy->regs.cio4_common))
+			return PTR_ERR(atcphy->regs.cio4_common);
+		return 0;
+	}
+
 	for (int i = 0; i < ARRAY_SIZE(resources); i++) {
 		res = platform_get_resource_byname(pdev, IORESOURCE_MEM, resources[i].name);
 		addr = devm_ioremap_resource(&pdev->dev, res);
@@ -2793,6 +2849,14 @@ static int atcphy_probe_finalize(struct apple_atcphy *atcphy)
 	int ret;
 
 	guard(mutex)(&atcphy->lock);
+
+	if (atcphy->hw->gen == ATCPHY_GENERATION_T6040) {
+		/* The fixed HDMI route has no USB/PIPE consumer to reset. */
+		ret = atcphy_probe_mux(atcphy);
+		if (ret)
+			return ret;
+		return atcphy_probe_phy(atcphy);
+	}
 
 	/* Reset dwc3 on probe, let dwc3 (consumer) deassert it */
 	_atcphy_dwc3_reset_assert(atcphy);
@@ -2833,12 +2897,27 @@ static int atcphy_probe(struct platform_device *pdev)
 	atcphy->hw = of_device_get_match_data(&pdev->dev);
 	if (!atcphy->hw)
 		return -EINVAL;
+	if (atcphy->hw->gen == ATCPHY_GENERATION_T6040 &&
+	    !device_property_read_bool(dev, "apple,fixed-dp"))
+		return dev_err_probe(dev, -EOPNOTSUPP,
+				     "CIO4 bring-up currently supports fixed HDMI DP only\n");
 
 	atcphy->dev = dev;
 	atcphy->dp_link_rate = -1;
 	atcphy->np = dev->of_node;
 	mutex_init(&atcphy->lock);
 	platform_set_drvdata(pdev, atcphy);
+
+	if (atcphy->hw->gen == ATCPHY_GENERATION_T6040) {
+		const struct dev_pm_domain_attach_data pd_data = {
+			.pd_flags = PD_FLAG_DEV_LINK_ON,
+		};
+		struct dev_pm_domain_list *pd_list;
+
+		ret = devm_pm_domain_attach_list(dev, &pd_data, &pd_list);
+		if (ret < 0)
+			return dev_err_probe(dev, ret, "Failed to power CIO4 domains\n");
+	}
 
 	ret = atcphy_map_resources(pdev, atcphy);
 	if (ret)
@@ -2877,7 +2956,12 @@ static const struct atcphy_hw atcphy_hw_t8130 = {
 	.t8130 = true,
 };
 
+static const struct atcphy_hw atcphy_hw_t6040 = {
+	.gen = ATCPHY_GENERATION_T6040,
+};
+
 static const struct of_device_id atcphy_match[] = {
+	{ .compatible = "apple,t6040-atcphy", .data = &atcphy_hw_t6040 },
 	{ .compatible = "apple,t8130-atcphy", .data = &atcphy_hw_t8130 },
 	{ .compatible = "apple,t8103-atcphy", .data = &atcphy_hw_t8103 },
 	{ .compatible = "apple,t8122-atcphy", .data = &atcphy_hw_t8122 },

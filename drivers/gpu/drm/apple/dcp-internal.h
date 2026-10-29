@@ -137,6 +137,8 @@ struct dcp_panel {
 
 struct apple_dcp_hw_data {
 	u32 num_dptx_ports;
+	/* Zero retains the existing generation's endpoint selection. */
+	u32 dptx_endpoint;
 };
 
 /* TODO: move IOMFB members to its own struct */

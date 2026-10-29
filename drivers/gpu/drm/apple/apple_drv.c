@@ -930,7 +930,8 @@ static int add_dcp_components(struct device *dev,
 				 */
 				/* A Type-C connector supplies HPD/mux events, not a DRM component. */
 				if (of_device_is_compatible(port, "usb-c-connector") ||
-				    of_device_is_compatible(port, "apple,t8103-atcphy")) {
+				    of_device_is_compatible(port, "apple,t8103-atcphy") ||
+				    of_device_is_compatible(port, "apple,t6040-atcphy")) {
 					of_node_put(port);
 					continue;
 				}

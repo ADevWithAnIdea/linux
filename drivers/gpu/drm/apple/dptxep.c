@@ -783,8 +783,8 @@ int dptxep_init(struct apple_dcp *dcp)
 	init_completion(&dcp->dptxport[1].linkcfg_completion);
 
 	dcp->dptxep = afk_init(dcp,
-			dcp->fw_compat == DCP_FIRMWARE_V_26_6_T8140 ?
-			EPIC2C_ENDPOINT : DPTX_ENDPOINT, dptxep_ops);
+			dcp->hw.dptx_endpoint ?: (dcp->fw_compat == DCP_FIRMWARE_V_26_6_T8140 ?
+			EPIC2C_ENDPOINT : DPTX_ENDPOINT), dptxep_ops);
 	if (IS_ERR(dcp->dptxep))
 		return PTR_ERR(dcp->dptxep);
 

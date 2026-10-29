@@ -275,8 +275,9 @@ static void dcp_recv_msg(void *cookie, u8 endpoint, u64 message)
 		afk_receive_message(dcp->remoteallocep, message);
 		return;
 	case EPIC2C_ENDPOINT:
-		/* Neo moved the DPTX service from 0x2a to 0x2c. */
-		if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_T8140 && dcp->phy)
+		/* Neo and T6041 external firmware expose DPTX on 0x2c. */
+		if (dcp->phy && (dcp->hw.dptx_endpoint == EPIC2C_ENDPOINT ||
+				dcp->fw_compat == DCP_FIRMWARE_V_26_6_T8140))
 			afk_receive_message(dcp->dptxep, message);
 		else
 			afk_receive_message(dcp->epicep2c, message);
@@ -1275,12 +1276,13 @@ int dcp_start(struct platform_device *pdev)
 				 ret);
 
 		if (v26_6) {
-			if (dcp->fw_compat != DCP_FIRMWARE_V_26_6_T8140) {
-			ret = dcp_start_aux_ep(dcp, EPIC2C_ENDPOINT,
-					       &dcp->epicep2c);
-			if (ret)
-				return dev_err_probe(dcp->dev, ret,
-						     "Failed to start EPIC2C endpoint\n");
+			if (dcp->fw_compat != DCP_FIRMWARE_V_26_6_T8140 &&
+			    dcp->hw.dptx_endpoint != EPIC2C_ENDPOINT) {
+				ret = dcp_start_aux_ep(dcp, EPIC2C_ENDPOINT,
+						       &dcp->epicep2c);
+				if (ret)
+					return dev_err_probe(dcp->dev, ret,
+							     "Failed to start EPIC2C endpoint\n");
 			}
 
 			if (unstable_edid && !dcp_has_panel(dcp)) {
@@ -2376,8 +2378,15 @@ static const struct apple_dcp_hw_data apple_dcp_hw_dcpext = {
 	.num_dptx_ports = 2,
 };
 
+static const struct apple_dcp_hw_data apple_dcp_hw_t6041_dcpext = {
+	.num_dptx_ports = 2,
+	/* Native 26.6.2 announces dcpdptx-port-epic on 0x2c. */
+	.dptx_endpoint = EPIC2C_ENDPOINT,
+};
+
 static const struct of_device_id of_match[] = {
 	{ .compatible = "apple,t6041-dcp", .data = &apple_dcp_hw_dcp,    },
+	{ .compatible = "apple,t6041-dcpext", .data = &apple_dcp_hw_t6041_dcpext, },
 	{ .compatible = "apple,t6020-dcp", .data = &apple_dcp_hw_t6020,  },
 	{ .compatible = "apple,t8112-dcp", .data = &apple_dcp_hw_t8112,  },
 	{ .compatible = "apple,t8132-dcp", .data = &apple_dcp_hw_t8132,  },
