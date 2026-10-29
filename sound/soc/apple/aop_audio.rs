@@ -953,7 +953,6 @@ const HW_CFG_T6030: SndSocAopHwConfig = SndSocAopHwConfig {
 
 kernel::of_device_table!(
     OF_TABLE,
-    MODULE_OF_TABLE,
     <SndSocAopDriver as platform::Driver>::IdInfo,
     [
         (of::DeviceId::new(c_str!("apple,aop-audio")), &HW_CFG_T8013),
