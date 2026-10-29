@@ -305,8 +305,11 @@ static int dptxport_call_get_max_lane_count(struct apple_epic_service *service,
 		reply->retcode = cpu_to_le32(1);
 		reply->lane_count = cpu_to_le64(0);
 	} else {
-		/* No lanes are available before Type-C has selected a DP assignment. */
-		dptx->lane_count = phy_ops.dp.lanes;
+		/* M4 firmware queries before Type-C selects a DP assignment. */
+		if (dcp->fw_compat != DCP_FIRMWARE_V_26_6_T8140 && phy_ops.dp.lanes < 2)
+			dptx->lane_count = 4;
+		else
+			dptx->lane_count = phy_ops.dp.lanes;
 		reply->retcode = cpu_to_le32(!dptx->lane_count);
 		reply->lane_count = cpu_to_le64(dptx->lane_count);
 	}
