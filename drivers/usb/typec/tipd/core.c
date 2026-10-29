@@ -575,7 +575,7 @@ static bool cd321x_data_connected(const struct cd321x_status *st)
 	return st->data_status & TPS_DATA_STATUS_DATA_CONNECTION;
 }
 
-static void cd321x_mux_set(struct tps6598x *tps)
+static int cd321x_mux_set(struct tps6598x *tps)
 {
 	struct cd321x *cd321x = container_of(tps, struct cd321x, tps);
 
@@ -583,7 +583,7 @@ static void cd321x_mux_set(struct tps6598x *tps)
 	if (!of_machine_is_compatible("apple,j700") &&
 	    usb_role_switch_get_role(tps->role_sw) != USB_ROLE_NONE)
 		usb_role_switch_set_role(tps->role_sw, USB_ROLE_NONE);
-	typec_mux_set(cd321x->mux, &cd321x->state);
+	return typec_mux_set(cd321x->mux, &cd321x->state);
 }
 
 static void cd321x_typec_update_mode(struct tps6598x *tps, struct cd321x_status *st)
@@ -668,7 +668,13 @@ static void cd321x_typec_update_mode(struct tps6598x *tps, struct cd321x_status 
 		cd321x->state.alt = cd321x->port_altmode_tbt;
 		cd321x->state.mode = TYPEC_TBT_MODE;
 		cd321x->state.data = &tbt_data;
-		cd321x_mux_set(tps);
+		if (cd321x_mux_set(tps)) {
+			dev_err(tps->dev, "PHY configuration failed; not starting USB4 router\n");
+			cd321x->state.mode = TYPEC_STATE_SAFE;
+			cd321x->state.alt = NULL;
+			cd321x->state.data = NULL;
+			return;
+		}
 
 		tbt_switch_data.state = TYPEC_THUNDERBOLT_SWITCH_TBT;
 		tbt_switch_data.tbt = tbt_data;
@@ -689,7 +695,13 @@ static void cd321x_typec_update_mode(struct tps6598x *tps, struct cd321x_status 
 		cd321x->state.alt = NULL;
 		cd321x->state.data = &eusb_data;
 		cd321x->state.mode = TYPEC_MODE_USB4;
-		cd321x_mux_set(tps);
+		if (cd321x_mux_set(tps)) {
+			dev_err(tps->dev, "PHY configuration failed; not starting USB4 router\n");
+			cd321x->state.mode = TYPEC_STATE_SAFE;
+			cd321x->state.alt = NULL;
+			cd321x->state.data = NULL;
+			return;
+		}
 
 		tbt_switch_data.state = TYPEC_THUNDERBOLT_SWITCH_USB4;
 		tbt_switch_data.usb4 = eusb_data;
