@@ -101,8 +101,7 @@ struct IIOAopAlsDriver(IIORegistration<MsgProc>);
 
 kernel::of_device_table!(
     OF_TABLE,
-    MODULE_OF_TABLE,
-    (),
+    <IIOAopAlsDriver as platform::Driver>::IdInfo,
     [(of::DeviceId::new(c_str!("apple,aop-als")), ())]
 );
 
