@@ -5,6 +5,8 @@ config PHY_APPLE_ATC
 	depends on TYPEC
 	select GENERIC_PHY
 	select APPLE_TUNABLE
+	select APPLE_MAILBOX
+	select APPLE_RTKIT
 	help
 	  Enable this to add support for the Apple Type-C PHY found in
 	  Apple Silicon M-series SoCs. This PHY supports USB2,

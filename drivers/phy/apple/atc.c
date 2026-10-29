@@ -37,6 +37,7 @@
 #include <linux/pm_domain.h>
 #include <linux/reset-controller.h>
 #include <linux/soc/apple/tunable.h>
+#include <linux/soc/apple/rtkit.h>
 #include <linux/types.h>
 #include <linux/usb/pd.h>
 #include <linux/usb/typec.h>
@@ -666,6 +667,9 @@ struct apple_atcphy {
 	struct device *dev;
 
 	struct {
+		struct apple_tunable *cio4_fabric;
+		struct apple_tunable *cio4_common;
+		struct apple_tunable *cio4_analog;
 		struct apple_tunable *axi2af;
 		struct apple_tunable *pipehandler;
 		struct apple_tunable *lpdptx;
@@ -683,6 +687,9 @@ struct apple_atcphy {
 	bool pipehandler_up;
 	bool usb2_up;
 	bool usb3_host_ready;
+	bool fixed_dp;
+	bool cio4_running;
+	struct apple_rtkit *cio4_rtk;
 	bool fixed_usb3;
 	bool fixed_lane_swap;
 
@@ -693,12 +700,15 @@ struct apple_atcphy {
 		void __iomem *pipehandler;
 		void __iomem *pipe_clocks;
 		void __iomem *lpdptx;
+		void __iomem *cio4_cpu;
+		void __iomem *cio4_sram;
 		void __iomem *cio4_power;
 		void __iomem *cio4_fabric;
 		void __iomem *cio4_common;
 	} regs;
 
 	struct {
+		struct resource *cio4_sram;
 		struct resource *core;
 		struct resource *axi2af;
 		struct resource *pipehandler;
@@ -2319,6 +2329,7 @@ static const struct phy_ops apple_atc_usb3_phy_ops = {
 };
 
 #include "atc-t6040-dp.h"
+#include "atc-t6040-usb4.h"
 
 static int atcphy_dpphy_set_mode(struct phy *phy, enum phy_mode mode, int submode)
 {
@@ -2602,6 +2613,18 @@ static int atcphy_mux_set(struct typec_mux_dev *mux, struct typec_mux_state *sta
 	guard(mutex)(&atcphy->lock);
 
 	if (atcphy->hw->gen == ATCPHY_GENERATION_T6040) {
+		if (!atcphy->fixed_dp) {
+			if (state->mode == TYPEC_STATE_SAFE)
+				return t6040_cio4_disable(atcphy);
+			if (state->mode == TYPEC_STATE_USB) {
+				/* No SuperSpeed USB consumer on this bring-up node yet. */
+				return 0;
+			}
+			if ((!state->alt && state->mode == TYPEC_MODE_USB4) ||
+			    (state->alt && state->alt->svid == USB_TYPEC_TBT_SID))
+				return t6040_cio4_enable(atcphy);
+			return -EOPNOTSUPP;
+		}
 		if (state->alt && state->alt->svid == USB_TYPEC_DP_SID &&
 		    (state->mode == TYPEC_DP_STATE_C || state->mode == TYPEC_DP_STATE_E))
 			return t6040_dp_enable(atcphy);
@@ -2820,6 +2843,8 @@ static int atcphy_map_resources(struct platform_device *pdev, struct apple_atcph
 		atcphy->regs.cio4_common = devm_platform_ioremap_resource_byname(pdev, "common");
 		if (IS_ERR(atcphy->regs.cio4_common))
 			return PTR_ERR(atcphy->regs.cio4_common);
+		if (!atcphy->fixed_dp)
+			return t6040_cio4_map(pdev, atcphy);
 		return 0;
 	}
 
@@ -2855,6 +2880,11 @@ static int atcphy_probe_finalize(struct apple_atcphy *atcphy)
 		ret = atcphy_probe_mux(atcphy);
 		if (ret)
 			return ret;
+		if (!atcphy->fixed_dp) {
+			ret = atcphy_probe_switch(atcphy);
+			if (ret)
+				return ret;
+		}
 		return atcphy_probe_phy(atcphy);
 	}
 
@@ -2897,10 +2927,7 @@ static int atcphy_probe(struct platform_device *pdev)
 	atcphy->hw = of_device_get_match_data(&pdev->dev);
 	if (!atcphy->hw)
 		return -EINVAL;
-	if (atcphy->hw->gen == ATCPHY_GENERATION_T6040 &&
-	    !device_property_read_bool(dev, "apple,fixed-dp"))
-		return dev_err_probe(dev, -EOPNOTSUPP,
-				     "CIO4 bring-up currently supports fixed HDMI DP only\n");
+	atcphy->fixed_dp = device_property_read_bool(dev, "apple,fixed-dp");
 
 	atcphy->dev = dev;
 	atcphy->dp_link_rate = -1;
