@@ -267,6 +267,15 @@
 		};
 	};
 
+	timer {
+		compatible = "arm,armv8-timer";
+		interrupt-parent = <&aic>;
+		interrupt-names = "phys", "virt", "hyp-phys", "hyp-virt";
+		interrupts = <AIC_FIQ AIC_TMR_GUEST_PHYS IRQ_TYPE_LEVEL_HIGH>,
+		             <AIC_FIQ AIC_TMR_GUEST_VIRT IRQ_TYPE_LEVEL_HIGH>,
+		             <AIC_FIQ AIC_TMR_HV_PHYS IRQ_TYPE_LEVEL_HIGH>,
+		             <AIC_FIQ AIC_TMR_HV_VIRT IRQ_TYPE_LEVEL_HIGH>;
+	};
 
 	clkref: clock-ref {
 		compatible = "fixed-clock";
@@ -350,6 +359,199 @@
 			interrupt-names = "send-empty", "send-not-empty",
 					  "recv-empty", "recv-not-empty";
 			#mbox-cells = <0>;
+			status = "disabled";
+		};
+
+		pmp_dart: iommu@380300000 {
+			compatible = "apple,t8132-dart", "apple,t8110-dart";
+			reg = <0x3 0x80300000 0x0 0xc000>;
+			#iommu-cells = <1>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 881 IRQ_TYPE_LEVEL_HIGH>;
+			power-domains = <&ps_pmp>;
+			apple,dma-range = <0x100 0x0 0x10 0x0>;
+			status = "disabled";
+		};
+
+		pmp_report: pmp-report@3803c0000 {
+			compatible = "apple,t8132-pmp-v2-report";
+			reg = <0x3 0x803c0000 0x0 0x20000>,
+			      <0x3 0x828ac000 0x0 0x2c>;
+			reg-names = "report", "event-config";
+			power-domains = <&ps_pms_sram>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+
+			/* Native macOS asserts these two undocumented PMP startup
+			 * votes before the DISPEXT1_SYS vote and before starting PMP. */
+			pmp_report_boot_f: report@f {
+				compatible = "apple,t6000-pmp-v2-report-entry";
+				reg = <0xf>;
+				label = "pmp-boot-f";
+				#power-domain-cells = <0>;
+			};
+
+			pmp_report_boot_10: report@10 {
+				compatible = "apple,t6000-pmp-v2-report-entry";
+				reg = <0x10>;
+				label = "pmp-boot-10";
+				#power-domain-cells = <0>;
+			};
+
+			pmp_report_dispext1: report@11 {
+				compatible = "apple,t6000-pmp-v2-report-entry";
+				reg = <0x11>;
+				label = "pmp-dispext1";
+				#power-domain-cells = <0>;
+				power-domains = <&ps_dispext1_sys>;
+			};
+
+			/* Native macOS retains these votes after probing the ATC paths
+			 * and before PMP reports ready.  Keep them separately named so
+			 * their necessity can be tested independently on J773g. */
+			pmp_report_atc0_common: report@12 {
+				compatible = "apple,t6000-pmp-v2-report-entry";
+				reg = <0x12>;
+				label = "pmp-atc0-common";
+				#power-domain-cells = <0>;
+			};
+
+			pmp_report_atc3_common: report@15 {
+				compatible = "apple,t6000-pmp-v2-report-entry";
+				reg = <0x15>;
+				label = "pmp-atc3-common";
+				#power-domain-cells = <0>;
+			};
+
+			pmp_report_agx: report@4 {
+				compatible = "apple,t6000-pmp-v2-report-entry";
+				reg = <0x4>;
+				label = "pmp-agx";
+				#power-domain-cells = <0>;
+				power-domains = <&ps_gfx>;
+				/*
+				 * PMP reads the GPU block (SGX) while it runs, and takes a
+				 * bus error if the GPU domain is off. Keep the vote, and
+				 * through it ps_gfx, on even when the GPU driver does not
+				 * bind or fails before it starts its mailbox.
+				 */
+				apple,always-on;
+			};
+
+			pmp_report_disp: report@7 {
+				compatible = "apple,t6000-pmp-v2-report-entry";
+				reg = <0x7>;
+				label = "pmp-disp";
+				#power-domain-cells = <0>;
+			};
+
+			pmp_report_atc1: report@13 {
+				compatible = "apple,t6000-pmp-v2-report-entry";
+				reg = <0x13>;
+				label = "pmp-atc1";
+				#power-domain-cells = <0>;
+			};
+
+			pmp_report_atc2: report@14 {
+				compatible = "apple,t6000-pmp-v2-report-entry";
+				reg = <0x14>;
+				label = "pmp-atc2";
+				#power-domain-cells = <0>;
+			};
+
+			pmp_report_soc_ni0: report@16 {
+				compatible = "apple,t6000-pmp-v2-report-entry";
+				reg = <0x16>;
+				label = "pmp-soc-ni0";
+				#power-domain-cells = <0>;
+			};
+
+			pmp_report_soc_ni1: report@17 {
+				compatible = "apple,t6000-pmp-v2-report-entry";
+				reg = <0x17>;
+				label = "pmp-soc-ni1";
+				#power-domain-cells = <0>;
+			};
+
+			pmp_report_soc_ni3: report@19 {
+				compatible = "apple,t6000-pmp-v2-report-entry";
+				reg = <0x19>;
+				label = "pmp-soc-ni3";
+				#power-domain-cells = <0>;
+			};
+
+			pmp_report_soc_ni4: report@1a {
+				compatible = "apple,t6000-pmp-v2-report-entry";
+				reg = <0x1a>;
+				label = "pmp-soc-ni4";
+				#power-domain-cells = <0>;
+			};
+
+			pmp_report_soc_ni5: report@1b {
+				compatible = "apple,t6000-pmp-v2-report-entry";
+				reg = <0x1b>;
+				label = "pmp-soc-ni5";
+				#power-domain-cells = <0>;
+			};
+
+			pmp_report_ans: report@1d {
+				compatible = "apple,t6000-pmp-v2-report-entry";
+				reg = <0x1d>;
+				label = "pmp-ans";
+				#power-domain-cells = <0>;
+			};
+
+			pmp_report_pcie: report@1e {
+				compatible = "apple,t6000-pmp-v2-report-entry";
+				reg = <0x1e>;
+				label = "pmp-pcie";
+				#power-domain-cells = <0>;
+			};
+
+			pmp_report_sio: report@22 {
+				compatible = "apple,t6000-pmp-v2-report-entry";
+				reg = <0x22>;
+				label = "pmp-sio";
+				#power-domain-cells = <0>;
+			};
+
+			pmp_report_boot_18: report@18 {
+				compatible = "apple,t6000-pmp-v2-report-entry";
+				reg = <0x18>;
+				label = "pmp-boot-18";
+				#power-domain-cells = <0>;
+			};
+		};
+
+		pmp: pmp@380500000 {
+			compatible = "apple,t8132-pmp-v2", "apple,t6000-pmp-v2";
+			reg = <0x3 0x80500000 0x0 0xc0000>,
+			      <0x3 0x80e00000 0x0 0x4000>;
+			reg-names = "pmp", "asc";
+			mboxes = <&pmp_mbox>;
+			mbox-names = "mbox";
+			iommus = <&pmp_dart 0>;
+			power-domains = <&ps_pmp>;
+			status = "disabled";
+		};
+
+		pmp_mbox: mailbox@380e08000 {
+			compatible = "apple,t8103-asc-mailbox", "apple,asc-mailbox-v4";
+			reg = <0x3 0x80e08000 0x0 0x4000>;
+			interrupt-parent = <&aic>;
+			/*
+			 * In the binding's order, empty before not-empty. The ADT
+			 * lists each pair the other way round (878, 877, 880, 879).
+			 */
+			interrupts = <AIC_IRQ 877 IRQ_TYPE_LEVEL_HIGH>,
+			             <AIC_IRQ 878 IRQ_TYPE_LEVEL_HIGH>,
+			             <AIC_IRQ 879 IRQ_TYPE_LEVEL_HIGH>,
+			             <AIC_IRQ 880 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "send-empty", "send-not-empty",
+			                  "recv-empty", "recv-not-empty";
+			#mbox-cells = <0>;
+			power-domains = <&ps_pmp>, <&ps_pms_sram>;
 			status = "disabled";
 		};
 
@@ -637,12 +839,12 @@
 			/* child nodes are added in t8132-pmgr.dtsi */
 		};
 
-		aic: interrupt-controller@381000000 {
+		aic: interrupt-controller@381180000 {
 			compatible = "apple,t8132-aic3", "apple,t8122-aic3";
 			#interrupt-cells = <3>;
 			interrupt-controller;
-			reg = <0x3 0x81000000 0x0 0x1cc000>,
-			      <0x3 0x81040000 0x0 0x4000>;
+			reg = <0x00000003 0x81000000 0x00000000 0x1cc000>,
+			      <0x00000003 0x81040000 0x00000000 0x4000>;
 			reg-names = "core", "event";
 			power-domains = <&ps_aic>;
 
@@ -682,10 +884,11 @@
 			compatible = "apple,t8132-mca";
 			reg = <0x3 0x93600000 0 0xc000>;
 			#sound-dai-cells = <1>;
-			clocks = <&clkref>;
-			power-domains = <&ps_audio_p>, <&ps_audio_mca0_m>;
-			dmas = <&admac 0>;
-			dma-names = "tx0a";
+			clocks = <&clkref>, <&clkref>, <&clkref>;
+			power-domains = <&ps_audio_p>, <&ps_audio_mca0_m>,
+					<&ps_audio_mca1_m>, <&ps_audio_mca2_m>;
+			dmas = <&admac 0>, <&admac 2>, <&admac 4>;
+			dma-names = "tx0a", "tx1a", "tx2a";
 			status = "disabled";
 		};
 
@@ -699,6 +902,22 @@
 			iommus = <&dart_audio 8>;
 			power-domains = <&ps_audio_base_ns_a>;
 			status = "disabled";
+		};
+
+		pmgr_mini: power-management@388280000 {
+			compatible = "apple,t8132-pmgr", "apple,t8103-pmgr", "syscon", "simple-mfd";
+			#address-cells = <1>;
+			#size-cells = <1>;
+			reg = <0x3 0x88280000 0 0x4000>;
+			/* child nodes are added in t8132-pmgr.dtsi */
+		};
+
+		wdt: watchdog@3882b0000 {
+			compatible = "apple,t8132-wdt", "apple,t8103-wdt";
+			reg = <0x3 0x882b0000 0x0 0x4000>;
+			clocks = <&clkref>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 507 IRQ_TYPE_LEVEL_HIGH>;
 		};
 
 		pinctrl_nub: pinctrl@3881f0000 {
@@ -721,22 +940,6 @@
 			             <AIC_IRQ 503 IRQ_TYPE_LEVEL_HIGH>,
 			             <AIC_IRQ 504 IRQ_TYPE_LEVEL_HIGH>,
 			             <AIC_IRQ 505 IRQ_TYPE_LEVEL_HIGH>;
-		};
-
-		pmgr_mini: power-management@388280000 {
-			compatible = "apple,t8132-pmgr", "apple,t8103-pmgr", "syscon", "simple-mfd";
-			#address-cells = <1>;
-			#size-cells = <1>;
-			reg = <0x3 0x88280000 0 0x4000>;
-			/* child nodes are added in t8132-pmgr.dtsi */
-		};
-
-		wdt: watchdog@3882b0000 {
-			compatible = "apple,t8132-wdt", "apple,t8103-wdt";
-			reg = <0x3 0x882b0000 0x0 0x4000>;
-			clocks = <&clkref>;
-			interrupt-parent = <&aic>;
-			interrupts = <AIC_IRQ 507 IRQ_TYPE_LEVEL_HIGH>;
 		};
 
 		pinctrl_smc: pinctrl@38c820000 {
@@ -846,7 +1049,6 @@
 			#address-cells = <0x1>;
 			#size-cells = <0x0>;
 			power-domains = <&ps_i2c0>;
-
 			status = "disabled";
 		};
 
@@ -861,7 +1063,6 @@
 			#address-cells = <0x1>;
 			#size-cells = <0x0>;
 			power-domains = <&ps_i2c1>;
-
 			status = "disabled";
 		};
 
@@ -876,7 +1077,6 @@
 			#address-cells = <0x1>;
 			#size-cells = <0x0>;
 			power-domains = <&ps_i2c2>;
-
 			status = "disabled";
 		};
 
@@ -891,7 +1091,6 @@
 			#address-cells = <0x1>;
 			#size-cells = <0x0>;
 			power-domains = <&ps_i2c3>;
-
 			status = "disabled";
 		};
 
@@ -906,7 +1105,6 @@
 			#address-cells = <0x1>;
 			#size-cells = <0x0>;
 			power-domains = <&ps_i2c4>;
-
 			status = "disabled";
 		};
 
@@ -916,7 +1114,6 @@
 			power-domains = <&ps_fpwm1>;
 			clocks = <&clkref>;
 			#pwm-cells = <2>;
-
 			status = "disabled";
 		};
 
@@ -929,7 +1126,6 @@
 			clocks = <&clkref>, <&clkref>;
 			clock-names = "uart", "clk_uart_baud0";
 			power-domains = <&ps_uart0>;
-
 			status = "disabled";
 		};
 
@@ -953,6 +1149,12 @@
 			reg-names = "smc", "sram";
 			mboxes = <&smc_mbox>;
 
+			smc_rtc: rtc {
+				compatible = "apple,smc-rtc";
+				nvmem-cells = <&rtc_offset>;
+				nvmem-cell-names = "rtc_offset";
+			};
+
 			smc_gpio: gpio {
 				compatible = "apple,smc-gpio";
 				gpio-controller;
@@ -974,6 +1176,39 @@
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ 520 IRQ_TYPE_LEVEL_HIGH>;
 			power-domains = <&ps_nub_spmi_a0>;
+		};
+
+		/*
+		 * The main PMU ("abbey", ADT /arm-io/nub-spmi0/pmu-main, reg 0xe) is on
+		 * this SPMI bus. Its scratch registers hold the RTC offset that
+		 * macsmc-rtc needs: ADT info-rtc_scrpad = 0x2100 and info-pm_setting =
+		 * 0x2001, the same layout as t8112's 0xf900/0xf801 shifted by -0xd800.
+		 */
+		nub_spmi0: spmi@388714000 {
+			compatible = "apple,t8132-spmi", "apple,t8103-spmi";
+			reg = <0x3 0x88714000 0x0 0x100>;
+			#address-cells = <2>;
+			#size-cells = <0>;
+			power-domains = <&ps_nub_spmi0>;
+
+			pmic1: pmic@e {
+				compatible = "apple,abbey-pmic", "apple,spmi-nvmem";
+				reg = <0xe SPMI_USID>;
+
+				nvmem-layout {
+					compatible = "fixed-layout";
+					#address-cells = <1>;
+					#size-cells = <1>;
+
+					pm_setting: pm-setting@2001 {
+						reg = <0x2001 0x1>;
+					};
+
+					rtc_offset: rtc-offset@2100 {
+						reg = <0x2100 0x6>;
+					};
+				};
+			};
 		};
 
 		nub_spmi_a1: spmi@388a08000 {
@@ -1370,16 +1605,6 @@
 
 			apple,sart = <&sart>;
 		};
-	};
-
-	timer {
-		compatible = "arm,armv8-timer";
-		interrupt-parent = <&aic>;
-		interrupt-names = "phys", "virt", "hyp-phys", "hyp-virt";
-		interrupts = <AIC_FIQ AIC_TMR_GUEST_PHYS IRQ_TYPE_LEVEL_HIGH>,
-		             <AIC_FIQ AIC_TMR_GUEST_VIRT IRQ_TYPE_LEVEL_HIGH>,
-		             <AIC_FIQ AIC_TMR_HV_PHYS IRQ_TYPE_LEVEL_HIGH>,
-		             <AIC_FIQ AIC_TMR_HV_VIRT IRQ_TYPE_LEVEL_HIGH>;
 	};
 };
 

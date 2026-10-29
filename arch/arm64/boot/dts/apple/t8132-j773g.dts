@@ -22,6 +22,7 @@
 		compatible = "apple,j773g-speaker";
 		apple,mca = <&mca>;
 		apple,codec = <&speaker_amp>;
+		apple,headphone-codec = <&jack_codec>;
 	};
 
 	aliases {
@@ -143,7 +144,7 @@
 		compatible = "apple,sn201202x";
 		reg = <0x8 SPMI_USID>;
 		interrupts = <63 IRQ_TYPE_EDGE_RISING>,
-			<64 IRQ_TYPE_EDGE_RISING>,
+			<65 IRQ_TYPE_EDGE_RISING>,
 			<69 IRQ_TYPE_EDGE_RISING>,
 			<71 IRQ_TYPE_EDGE_RISING>;
 		interrupt-names = "irq", "select", "sleep", "wake";
@@ -273,6 +274,7 @@
 
 #include "hwmon-common.dtsi"
 #include "hwmon-mini.dtsi"
+#include "t8132-usb4.dtsi"
 
 &i2c3 {
 	status = "okay";
@@ -297,4 +299,104 @@
 		#sound-dai-cells = <0>;
 		shutdown-gpios = <&pinctrl_ap 15 GPIO_ACTIVE_HIGH>;
 	};
+};
+
+&i2c1 {
+	status = "okay";
+
+	jack_codec: codec@4b {
+		compatible = "cirrus,cs42l84";
+		reg = <0x4b>;
+		reset-gpios = <&pinctrl_nub 17 GPIO_ACTIVE_HIGH>;
+		interrupt-parent = <&pinctrl_ap>;
+		interrupts = <98 IRQ_TYPE_LEVEL_LOW>;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "Jack";
+	};
+};
+
+/*
+ * Research (t8132-pmp-power): bring up the PMP co-processor and the report
+ * votes macOS holds at steady state (mask 0x1278000), to measure whether PMP
+ * lowers idle power.
+ */
+&pmp_report_boot_f {
+	apple,always-on;
+};
+
+&pmp_report_boot_10 {
+	apple,always-on;
+};
+
+&pmp_report_dispext1 {
+	apple,always-on;
+};
+
+&pmp_report_atc0_common {
+	apple,always-on;
+};
+
+&pmp_report_atc3_common {
+	apple,always-on;
+};
+
+&pmp_report_boot_18 {
+	apple,always-on;
+};
+
+&pmp_dart {
+	status = "okay";
+};
+
+&pmp_report {
+	status = "okay";
+};
+
+&pmp_mbox {
+	status = "okay";
+};
+
+&pmp {
+	status = "okay";
+};
+
+/* Research (t8132-pmp-votes): steady votes for everything the system uses; the GPU vote follows its genpd. */
+&pmp_report_disp {
+	apple,always-on;
+};
+
+&pmp_report_soc_ni0 {
+	apple,always-on;
+};
+
+&pmp_report_soc_ni1 {
+	apple,always-on;
+};
+
+&pmp_report_soc_ni3 {
+	apple,always-on;
+};
+
+&pmp_report_soc_ni4 {
+	apple,always-on;
+};
+
+&pmp_report_soc_ni5 {
+	apple,always-on;
+};
+
+&pmp_report_ans {
+	apple,always-on;
+};
+
+&pmp_report_pcie {
+	apple,always-on;
+};
+
+&pmp_report_atc1 {
+	apple,always-on;
+};
+
+&pmp_report_atc2 {
+	apple,always-on;
 };
