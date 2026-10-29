@@ -327,8 +327,7 @@ struct SepDriver(Arc<SepData>);
 
 kernel::of_device_table!(
     OF_TABLE,
-    MODULE_OF_TABLE,
-    (),
+    <SepDriver as platform::Driver>::IdInfo,
     [(of::DeviceId::new(c"apple,sep"), ())]
 );
 
