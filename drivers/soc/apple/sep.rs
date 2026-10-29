@@ -229,7 +229,7 @@ impl SepData {
             },
             false,
         )?;
-        let shm_addr = self.shmem.dma_handle() >> IOVA_SHIFT;
+        let shm_addr = self.shmem.dma_address() >> IOVA_SHIFT;
         mbox.send(
             Message {
                 msg0: EP_SHMEM | (MSG_SET_SHMEM << MSG_TYPE_SHIFT) | (shm_addr << MSG_DATA_SHIFT),

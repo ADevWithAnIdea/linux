@@ -59,7 +59,7 @@ impl platform::Driver for IIOAopLasDriver {
             c"aop-sensors-las",
             ty,
             info_mask,
-            &THIS_MODULE,
+            kernel::module::this_module::<LocalModule>(),
         )?))
     }
 }
