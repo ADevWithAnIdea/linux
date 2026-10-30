@@ -1146,7 +1146,8 @@ impl Session {
     /// ahead=1 is next; further ordered seeds are checked again at commit.
     pub(crate) fn render_scratch_seed(&self, p: &super::g17p_render::Parameters)
         -> Result<Option<render::ScratchSeed>> {
-        if !self.independent_render_roots() || self.phase != Phase::Running { return Ok(None); }
+        // Ordinary single-root jobs also need private scratch for new geometry.
+        if self.phase != Phase::Running { return Ok(None); }
         self.render.as_ref().or(self.dormant_render.as_ref())
             .map_or(Ok(None), |work| work.scratch_seed(p))
     }
