@@ -589,8 +589,12 @@ static int dchid_start_interface(struct dchid_iface *iface)
 
 		/* After loading firmware, multi-touch needs a reset */
 		dev_info(iface->dchid->dev, "Resetting %s\n", iface->name);
-		dchid_reset_interface(iface, 0);
-		dchid_reset_interface(iface, 2);
+		ret = dchid_reset_interface(iface, 0);
+		if (ret < 0)
+			goto err;
+		ret = dchid_reset_interface(iface, 2);
+		if (ret < 0)
+			goto err;
 	}
 
 	return 0;
@@ -629,9 +633,15 @@ static int dchid_open(struct hid_device *hdev)
 	int ret;
 
 	if (!completion_done(&iface->ready)) {
-		ret = dchid_start_interface(iface);
-		if (ret < 0)
-			return ret;
+		/* A previous open may have timed out before the ready notification.
+		 * Wait for that initialization instead of rejecting every later open
+		 * or provisioning the interface again while it is still starting.
+		 */
+		if (!iface->starting) {
+			ret = dchid_start_interface(iface);
+			if (ret < 0)
+				return ret;
+		}
 
 		if (!wait_for_completion_timeout(&iface->ready, msecs_to_jiffies(START_TIMEOUT_MS))) {
 			dev_err(iface->dchid->dev, "iface %s start timed out\n", iface->name);

@@ -215,7 +215,7 @@ static int magicmouse_open(struct input_dev *dev)
 		ret = magicmouse_enable_multitouch(hdev);
 		if (ret != -EIO && ret < 0) {
 			hid_err(hdev, "unable to request touch data (%d)\n", ret);
-			return ret;
+			goto err_close;
 		}
 		if (ret == -EIO && (hdev->product == USB_DEVICE_ID_APPLE_MAGICMOUSE2 ||
 				hdev->product == USB_DEVICE_ID_APPLE_MAGICMOUSE2_USBC)) {
@@ -246,10 +246,19 @@ static int magicmouse_open(struct input_dev *dev)
 		ret = hid_hw_raw_request(hdev, SENSOR_DIMENSIONS_REPORT_ID, buf, sizeof(buf), HID_FEATURE_REPORT, HID_REQ_GET_REPORT);
 		if (ret < (int)(1 + sizeof(dim))) {
 			hid_err(hdev, "unable to request dimensions (%d)\n", ret);
-			return ret;
+			if (ret >= 0)
+				ret = -EIO;
+			goto err_close;
 		}
 
 		memcpy(&dim, buf + 1, sizeof(dim));
+		if (!le32_to_cpu(dim.width) || !le32_to_cpu(dim.height) ||
+		    le16_to_int(dim.min_x) >= le16_to_int(dim.max_x) ||
+		    le16_to_int(dim.min_y) >= le16_to_int(dim.max_y)) {
+			hid_err(hdev, "invalid touch dimensions\n");
+			ret = -EINVAL;
+			goto err_close;
+		}
 
 		/* finger position */
 		input_set_abs_params(input, ABS_MT_POSITION_X,
@@ -272,6 +281,10 @@ static int magicmouse_open(struct input_dev *dev)
 	}
 
 	return 0;
+
+err_close:
+	hid_hw_close(hdev);
+	return ret;
 }
 
 static void magicmouse_close(struct input_dev *dev)
