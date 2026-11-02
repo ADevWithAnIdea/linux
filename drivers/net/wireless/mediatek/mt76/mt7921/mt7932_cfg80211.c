@@ -32,7 +32,7 @@ void mt7932_cfg80211_scan_done(struct mt7932_fullmac *fm, bool aborted)
 	cfg80211_scan_done(request, &info);
 }
 
-static void mt7932_cancel_scan(struct mt7932_fullmac *fm)
+static int mt7932_cancel_scan(struct mt7932_fullmac *fm)
 {
 	struct {
 		u8 seq_num;
@@ -42,7 +42,7 @@ static void mt7932_cancel_scan(struct mt7932_fullmac *fm)
 	int ret;
 
 	if (!fm->scan_request)
-		return;
+		return 0;
 	mt792x_mutex_acquire(fm->dev);
 	ret = mt76_mcu_send_msg(&fm->dev->mt76, MCU_CE_CMD(CANCEL_HW_SCAN),
 			       &cmd, sizeof(cmd), false);
@@ -53,6 +53,7 @@ static void mt7932_cancel_scan(struct mt7932_fullmac *fm)
 	mt7932_cfg80211_scan_done(fm, true);
 	if (ret)
 		mt792x_reset(&fm->dev->mt76);
+	return ret;
 }
 
 static void mt7932_scan_timeout(struct wiphy *wiphy, struct wiphy_work *work)
@@ -283,7 +284,7 @@ static int mt7932_cfg_connect(struct wiphy *wiphy, struct net_device *netdev,
 	struct cfg80211_bss *bss;
 	int ret;
 
-	if (fm->connecting || fm->connected || fm->disconnecting || fm->scan_request)
+	if (fm->connecting || fm->connected || fm->disconnecting)
 		return -EBUSY;
 	if (READ_ONCE(fm->removing) || fm->dev->fw_assert)
 		return -EIO;
@@ -325,6 +326,15 @@ static int mt7932_cfg_connect(struct wiphy *wiphy, struct net_device *netdev,
 	params->band = MT7932_BAND_6GHZ;
 	params->channel = bss->channel->hw_value;
 	ether_addr_copy(params->bssid, bss->bssid);
+	/* NetworkManager can select a cached BSS while a background scan is
+	 * still running. Stop that scan before asking the firmware SME to
+	 * associate; returning EBUSY leaves userspace retrying scans instead.
+	 */
+	ret = mt7932_cancel_scan(fm);
+	if (ret) {
+		kfree_sensitive(params);
+		goto put_bss;
+	}
 	fm->connecting = true;
 	ret = mt7932_offload_connect(fm->dev, params);
 	kfree_sensitive(params);
