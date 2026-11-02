@@ -22,6 +22,7 @@ struct mt7932_fullmac {
 	u32 cal_center_khz;
 	bool cal_applied;
 	u8 bssid[ETH_ALEN];
+	u8 scan_mac[ETH_ALEN];
 	struct mt7932_cal_cache *cal;
 	struct sk_buff_head events;
 	struct wiphy_work event_work;

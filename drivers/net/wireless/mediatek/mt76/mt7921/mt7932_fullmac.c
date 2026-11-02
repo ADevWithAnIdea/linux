@@ -258,6 +258,10 @@ static const struct net_device_ops mt7932_native_ops = {
 	.ndo_open = mt7932_native_open,
 	.ndo_stop = mt7932_native_stop,
 	.ndo_start_xmit = mt7932_native_tx,
+	/* MAC changes are allowed only while the interface is down. Firmware
+	 * contexts take the current address when discovery/association starts.
+	 */
+	.ndo_set_mac_address = eth_mac_addr,
 	.ndo_validate_addr = eth_validate_addr,
 };
 
@@ -292,6 +296,7 @@ int mt7932_fullmac_init(struct mt792x_dev *dev)
 	netdev->netdev_ops = &mt7932_native_ops;
 	SET_NETDEV_DEV(netdev, dev->mt76.dev);
 	eth_hw_addr_set(netdev, dev->mphy.macaddr);
+	ether_addr_copy(netdev->perm_addr, dev->mphy.macaddr);
 	netif_carrier_off(netdev);
 	WRITE_ONCE(dev->fullmac, fm);
 	ret = mt7932_cfg80211_register(fm);

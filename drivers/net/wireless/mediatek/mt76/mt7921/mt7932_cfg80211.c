@@ -143,9 +143,20 @@ static int mt7932_prepare_discovery(struct mt7932_fullmac *fm)
 	};
 	int ret;
 
-	if (fm->scan_context_active)
+	if (fm->scan_context_active &&
+	    ether_addr_equal(fm->scan_mac, fm->netdev->dev_addr))
 		return 0;
-	ether_addr_copy(activate.mac, dev->mphy.macaddr);
+	if (fm->scan_context_active) {
+		activate.active = 0;
+		ether_addr_copy(activate.mac, fm->scan_mac);
+		ret = mt76_mcu_send_msg(&dev->mt76, MT7932_CMD_ACTIVATE_BSS,
+				       &activate, sizeof(activate), false);
+		if (ret)
+			return ret;
+		fm->scan_context_active = false;
+		activate.active = 1;
+	}
+	ether_addr_copy(activate.mac, fm->netdev->dev_addr);
 	ret = mt7932_start(&dev->phy);
 	if (!ret)
 		ret = mt76_mcu_send_msg(&dev->mt76, MT7932_CMD_ACTIVATE_BSS,
@@ -162,8 +173,10 @@ static int mt7932_prepare_discovery(struct mt7932_fullmac *fm)
 	}
 	if (!ret)
 		ret = mt7921_mcu_set_rxfilter(dev, 0, 0, 0);
-	if (!ret)
+	if (!ret) {
+		ether_addr_copy(fm->scan_mac, fm->netdev->dev_addr);
 		fm->scan_context_active = true;
+	}
 	return ret;
 }
 

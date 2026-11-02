@@ -5,6 +5,7 @@
 #include <linux/unaligned.h>
 #include "mt7921.h"
 #include "mt7932_offload.h"
+#include "mt7932_fullmac.h"
 #include "mt7932_mcu.h"
 
 /* Observed ABI offsets. Padding and the unclassified security buffer remain zero. */
@@ -115,7 +116,7 @@ int mt7932_offload_connect(struct mt792x_dev *dev,
 	if (!ret)
 		ret = mt76_mcu_send_msg(&dev->mt76, MT7932_CMD_SME_CONFIG,
 				       &profile, sizeof(profile), false);
-	ether_addr_copy(mac.mac, dev->mphy.macaddr);
+	ether_addr_copy(mac.mac, dev->fullmac->netdev->dev_addr);
 	if (!ret)
 		ret = mt76_mcu_send_msg(&dev->mt76, MT7932_CMD_AIS_MAC,
 				       &mac, sizeof(mac), false);
