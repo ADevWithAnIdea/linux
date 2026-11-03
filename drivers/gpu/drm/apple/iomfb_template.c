@@ -25,6 +25,8 @@
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_vblank.h>
 
+#include "gem-staging.h"
+
 #include "dcp.h"
 #include "dcp-internal.h"
 #include "afk.h"
@@ -975,10 +977,7 @@ static void dcp_swap_cleared(struct apple_dcp *dcp, void *data, void *cookie)
 					 struct dcp_fb_reference, head);
 		if (entry->swap_id == dcp->last_swap_id)
 			break;
-		if (entry->fb)
-			drm_framebuffer_put(entry->fb);
-		list_del(&entry->head);
-		kfree(entry);
+		apple_drm_release_fb_reference(entry);
 	}
 }
 
@@ -1547,10 +1546,7 @@ static void dcp_swapped(struct apple_dcp *dcp, void *data, void *cookie)
 					 struct dcp_fb_reference, head);
 		if (entry->swap_id == dcp->last_swap_id)
 			break;
-		if (entry->fb)
-			drm_framebuffer_put(entry->fb);
-		list_del(&entry->head);
-		kfree(entry);
+		apple_drm_release_fb_reference(entry);
 	}
 }
 
@@ -2070,6 +2066,8 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
 
 	for_each_oldnew_plane_in_state(commit, plane, old_state, new_state, plane_idx) {
 		struct apple_plane_state *apple_state = to_apple_plane_state(new_state);
+		struct apple_plane_state *old_apple_state =
+			to_apple_plane_state(old_state);
 		struct apple_plane *apl_plane = to_apple_plane(plane);
 
 		/* skip planes not for this crtc */
@@ -2078,6 +2076,14 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
 
 		l = apl_plane->iomfb_surf;
 		req->swap.swap_enabled |= BIT(l);
+
+		/* A new copy can replace an old copy even when the source FB is
+		 * unchanged. Follow DCP's swap retirement, not atomic-state cleanup.
+		 */
+		if (old_apple_state->scanout_shadow &&
+		    old_apple_state->scanout_shadow != apple_state->scanout_shadow)
+			apple_drm_retire_scanout(dcp, old_apple_state->scanout_shadow,
+						dcp->last_swap_id);
 
 		if (old_state->fb && new_state->fb != old_state->fb) {
 			/*

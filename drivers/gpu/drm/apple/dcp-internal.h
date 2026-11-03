@@ -100,6 +100,7 @@ struct dcp_channel {
 struct dcp_fb_reference {
 	struct list_head head;
 	struct drm_framebuffer *fb;
+	struct drm_gem_object *scanout_shadow;
 	u32 swap_id;
 };
 

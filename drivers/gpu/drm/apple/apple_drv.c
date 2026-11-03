@@ -37,6 +37,7 @@
 #include <drm/drm_fb_helper.h>
 #include <drm/drm_fbdev_dma.h>
 #include <drm/drm_fb_dma_helper.h>
+#include <drm/drm_framebuffer.h>
 #include <drm/drm_gem_dma_helper.h>
 #include <drm/drm_prime.h>
 #include <drm/drm_gem_framebuffer_helper.h>
@@ -76,6 +77,7 @@ struct apple_drm_gem_object {
 	dma_addr_t pool_dma_addr;
 	bool pool_fixed_iova;
 	bool cpu_import;
+	struct dcp_fb_reference retirement;
 };
 
 static void apple_drm_gem_restore_direct_map(struct apple_drm_gem_object *obj)
@@ -180,6 +182,38 @@ bool apple_drm_gem_is_cpu_import(struct drm_gem_dma_object *dma)
 	return obj->cpu_import;
 }
 
+/* Each copied plane owns a distinct GEM object, so its retirement record
+ * can live in the object itself instead of allocating in atomic_flush.
+ */
+void apple_drm_retire_scanout(struct apple_dcp *dcp,
+			      struct drm_gem_dma_object *dma, u32 swap_id)
+{
+	struct apple_drm_gem_object *obj =
+		container_of(dma, struct apple_drm_gem_object, dma);
+	struct dcp_fb_reference *entry = &obj->retirement;
+
+	if (WARN_ON(!list_empty(&entry->head)))
+		return;
+	entry->scanout_shadow = &dma->base;
+	entry->swap_id = swap_id;
+	drm_gem_object_get(&dma->base);
+	list_add_tail(&entry->head, &dcp->swapped_out_fbs);
+}
+
+void apple_drm_release_fb_reference(struct dcp_fb_reference *entry)
+{
+	struct drm_gem_object *shadow = entry->scanout_shadow;
+
+	list_del_init(&entry->head);
+	if (entry->fb)
+		drm_framebuffer_put(entry->fb);
+	if (shadow)
+		/* This put can free the embedded retirement record itself. */
+		drm_gem_object_put(shadow);
+	else
+		kfree(entry);
+}
+
 static int apple_drm_gem_mmap(struct drm_gem_object *gem, struct vm_area_struct *vma)
 {
 	if (apple_drm_gem_is_cpu_import(to_drm_gem_dma_obj(gem))) {
@@ -218,6 +252,7 @@ apple_drm_gem_create_object(struct drm_device *drm, size_t size)
 	if (!obj)
 		return ERR_PTR(-ENOMEM);
 
+	INIT_LIST_HEAD(&obj->retirement.head);
 	obj->dma.base.funcs = &apple_drm_gem_funcs;
 	return &obj->dma.base;
 }
