@@ -212,7 +212,10 @@ static int mt7932_native_open(struct net_device *netdev)
 
 static int mt7932_native_stop(struct net_device *netdev)
 {
+	struct mt7932_fullmac *fm = *(void **)netdev_priv(netdev);
+
 	netif_stop_queue(netdev);
+	mt7932_cfg80211_stop(fm);
 	return 0;
 }
 

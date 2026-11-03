@@ -66,6 +66,17 @@ static void mt7932_cfg_abort_scan(struct wiphy *wiphy, struct wireless_dev *wdev
 	mt7932_cancel_scan(mt7932_wiphy_priv(wiphy));
 }
 
+void mt7932_cfg80211_stop(struct mt7932_fullmac *fm)
+{
+	/* Finish before NETDEV_DOWN lets cfg80211 release its scan request.
+	 * A completion after that point only frees the stale driver reference;
+	 * it cannot deliver the deferred scan notification for a new scan.
+	 */
+	wiphy_lock(fm->wiphy);
+	mt7932_cancel_scan(fm);
+	wiphy_unlock(fm->wiphy);
+}
+
 void mt7932_cfg80211_connected(struct mt7932_fullmac *fm)
 {
 	lockdep_assert_wiphy(fm->wiphy);

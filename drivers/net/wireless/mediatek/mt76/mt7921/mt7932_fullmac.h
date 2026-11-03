@@ -29,6 +29,7 @@ struct mt7932_fullmac {
 };
 
 int mt7932_cfg80211_register(struct mt7932_fullmac *fm);
+void mt7932_cfg80211_stop(struct mt7932_fullmac *fm);
 void mt7932_cfg80211_unregister(struct mt7932_fullmac *fm);
 void mt7932_cfg80211_scan_done(struct mt7932_fullmac *fm, bool aborted);
 void mt7932_cfg80211_scan_complete(struct mt7932_fullmac *fm, u8 sequence);
