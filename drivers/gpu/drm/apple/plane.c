@@ -4,6 +4,7 @@
  */
 
 #include "plane.h"
+#include "gem-staging.h"
 
 #include "iomfb_internal.h"
 
@@ -14,8 +15,10 @@
 #include <drm/drm_fb_dma_helper.h>
 #include <drm/drm_framebuffer.h>
 #include <drm/drm_gem.h>
+#include <drm/drm_gem_atomic_helper.h>
 #include <drm/drm_gem_dma_helper.h>
 #include <drm/drm_plane.h>
+#include <drm/drm_panic.h>
 
 #include <linux/math.h>
 #include <linux/types.h>
@@ -413,17 +416,84 @@ static void apple_plane_atomic_update(struct drm_plane *plane,
 	 * support source position prefer that.
 	 */
 	obj = drm_fb_dma_get_gem_obj(base->fb, 0);
+	if (new_state->scanout_shadow)
+		obj = new_state->scanout_shadow;
 	if (obj)
 		new_state->iova = obj->dma_addr + base->fb->offsets[0];
 }
 
+static int apple_plane_prepare_fb(struct drm_plane *plane,
+				  struct drm_plane_state *state)
+{
+	struct apple_plane_state *apple = to_apple_plane_state(state);
+	struct drm_gem_dma_object *src;
+	unsigned int i;
+	int ret;
+
+	ret = drm_gem_plane_helper_prepare_fb(plane, state);
+	if (ret || !state->fb || !state->crtc)
+		return ret;
+	src = drm_fb_dma_get_gem_obj(state->fb, 0);
+	if (!src || !apple_drm_gem_is_cpu_import(src))
+		return 0;
+	for (i = 1; i < state->fb->format->num_planes; i++)
+		if (state->fb->obj[i] != state->fb->obj[0])
+			return -EINVAL;
+	/* Copy only after the producer's explicit/implicit fence completes. */
+	if (state->fence) {
+		ret = dma_fence_wait(state->fence, true);
+		if (ret)
+			return ret;
+	}
+	apple->scanout_shadow =
+		apple_drm_gem_create_scanout(plane->dev, src->base.size);
+	if (IS_ERR(apple->scanout_shadow)) {
+		ret = PTR_ERR(apple->scanout_shadow);
+		apple->scanout_shadow = NULL;
+		return ret;
+	}
+	ret = apple_drm_gem_copy_import(src, apple->scanout_shadow);
+	if (ret) {
+		drm_gem_object_put(&apple->scanout_shadow->base);
+		apple->scanout_shadow = NULL;
+	}
+	return ret;
+}
+
+static int apple_plane_get_scanout_buffer(struct drm_plane *plane,
+					struct drm_scanout_buffer *sb)
+{
+	struct apple_plane_state *apple;
+	struct drm_framebuffer *fb;
+
+	if (!plane->state || !plane->state->fb)
+		return -EINVAL;
+	apple = to_apple_plane_state(plane->state);
+	if (!apple->scanout_shadow)
+		return drm_fb_dma_get_scanout_buffer(plane, sb);
+
+	fb = plane->state->fb;
+	if (fb->modifier != DRM_FORMAT_MOD_LINEAR)
+		return -ENODEV;
+
+	/* Panic rendering must update the owned scanout, not its imported source. */
+	iosys_map_set_vaddr(&sb->map[0], apple->scanout_shadow->vaddr + fb->offsets[0]);
+	sb->format = fb->format;
+	sb->height = fb->height;
+	sb->width = fb->width;
+	sb->pitch[0] = fb->pitches[0];
+	return 0;
+}
+
 static const struct drm_plane_helper_funcs apple_primary_plane_helper_funcs = {
+	.prepare_fb	= apple_plane_prepare_fb,
 	.atomic_check	= apple_plane_atomic_check,
 	.atomic_update	= apple_plane_atomic_update,
-	.get_scanout_buffer = drm_fb_dma_get_scanout_buffer,
+	.get_scanout_buffer = apple_plane_get_scanout_buffer,
 };
 
 static const struct drm_plane_helper_funcs apple_plane_helper_funcs = {
+	.prepare_fb	= apple_plane_prepare_fb,
 	.atomic_check	= apple_plane_atomic_check,
 	.atomic_update	= apple_plane_atomic_update,
 };
@@ -432,8 +502,11 @@ static const struct drm_plane_helper_funcs apple_plane_helper_funcs = {
 static void apple_plane_reset(struct drm_plane *plane)
 {
         struct apple_plane_state *state = to_apple_plane_state(plane->state);
-	if (state)
+	if (state) {
+		if (state->scanout_shadow)
+			drm_gem_object_put(&state->scanout_shadow->base);
 		__drm_atomic_helper_plane_destroy_state(&state->base);
+	}
 
 	kfree(state);
 	plane->state = NULL;
@@ -471,13 +544,22 @@ apple_plane_duplicate_state(struct drm_plane *plane)
 // 	drm_atomic_helper_plane_destroy_state(plane, state);
 // }
 
+static void apple_plane_destroy_state(struct drm_plane *plane, struct drm_plane_state *state)
+{
+	struct apple_plane_state *apple = to_apple_plane_state(state);
+
+	if (apple->scanout_shadow)
+		drm_gem_object_put(&apple->scanout_shadow->base);
+	drm_atomic_helper_plane_destroy_state(plane, state);
+}
+
 static const struct drm_plane_funcs apple_plane_funcs = {
 	.update_plane		= drm_atomic_helper_update_plane,
 	.disable_plane		= drm_atomic_helper_disable_plane,
 	.reset			= apple_plane_reset,
 	.atomic_duplicate_state = apple_plane_duplicate_state,
 	// .atomic_destroy_state	= apple_plane_destroy_state,
-	.atomic_destroy_state	= drm_atomic_helper_plane_destroy_state,
+	.atomic_destroy_state	= apple_plane_destroy_state,
 };
 
 /*

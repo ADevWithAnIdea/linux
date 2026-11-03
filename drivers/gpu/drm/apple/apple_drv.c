@@ -10,6 +10,8 @@
 #include <linux/aperture.h>
 #include <linux/component.h>
 #include <linux/delay.h>
+#include <linux/dma-buf.h>
+#include <linux/iosys-map.h>
 #include <linux/dma-direct.h>
 #include <linux/dma-mapping.h>
 #include <linux/jiffies.h>
@@ -36,6 +38,7 @@
 #include <drm/drm_fbdev_dma.h>
 #include <drm/drm_fb_dma_helper.h>
 #include <drm/drm_gem_dma_helper.h>
+#include <drm/drm_prime.h>
 #include <drm/drm_gem_framebuffer_helper.h>
 #include <drm/drm_simple_kms_helper.h>
 #include <drm/drm_mode.h>
@@ -49,6 +52,7 @@
 
 #include "dcp.h"
 #include "plane.h"
+#include "gem-staging.h"
 
 #define DRIVER_NAME     "apple"
 #define DRIVER_DESC     "Apple display controller DRM driver"
@@ -71,6 +75,7 @@ struct apple_drm_gem_object {
 	struct sg_table *scanout_sgt;
 	dma_addr_t pool_dma_addr;
 	bool pool_fixed_iova;
+	bool cpu_import;
 };
 
 static void apple_drm_gem_restore_direct_map(struct apple_drm_gem_object *obj)
@@ -102,6 +107,18 @@ static void apple_drm_gem_free(struct drm_gem_object *gem_obj)
 	struct apple_drm_gem_object *obj =
 		container_of(to_drm_gem_dma_obj(gem_obj),
 			     struct apple_drm_gem_object, dma);
+
+	if (obj->cpu_import) {
+		struct dma_buf *buf = gem_obj->import_attach->dmabuf;
+		struct iosys_map map = IOSYS_MAP_INIT_VADDR(obj->dma.vaddr);
+
+		dma_buf_vunmap_unlocked(buf, &map);
+		dma_buf_detach(buf, gem_obj->import_attach);
+		dma_buf_put(buf);
+		drm_gem_object_release(gem_obj);
+		kfree(obj);
+		return;
+	}
 
 	if (obj->pool_fixed_iova) {
 		obj->dma.dma_addr = obj->pool_dma_addr;
@@ -155,12 +172,40 @@ static void apple_drm_gem_print_info(struct drm_printer *p,
 				  &(phys_addr_t){ run_end - run_start });
 }
 
+bool apple_drm_gem_is_cpu_import(struct drm_gem_dma_object *dma)
+{
+	struct apple_drm_gem_object *obj =
+		container_of(dma, struct apple_drm_gem_object, dma);
+
+	return obj->cpu_import;
+}
+
+static int apple_drm_gem_mmap(struct drm_gem_object *gem, struct vm_area_struct *vma)
+{
+	if (apple_drm_gem_is_cpu_import(to_drm_gem_dma_obj(gem))) {
+		/*
+		 * MAP_DUMB describes locally allocated buffers. Map imports through
+		 * their original DMA-BUF fd instead of inventing a DMA mapping.
+		 */
+		drm_gem_vm_close(vma);
+		return -EOPNOTSUPP;
+	}
+	return drm_gem_dma_object_mmap(gem, vma);
+}
+
+static struct sg_table *apple_drm_gem_get_sg_table(struct drm_gem_object *gem)
+{
+	if (apple_drm_gem_is_cpu_import(to_drm_gem_dma_obj(gem)))
+		return ERR_PTR(-EOPNOTSUPP);
+	return drm_gem_dma_object_get_sg_table(gem);
+}
+
 static const struct drm_gem_object_funcs apple_drm_gem_funcs = {
 	.free = apple_drm_gem_free,
 	.print_info = apple_drm_gem_print_info,
-	.get_sg_table = drm_gem_dma_object_get_sg_table,
+	.get_sg_table = apple_drm_gem_get_sg_table,
 	.vmap = drm_gem_dma_object_vmap,
-	.mmap = drm_gem_dma_object_mmap,
+	.mmap = apple_drm_gem_mmap,
 	.vm_ops = &drm_gem_dma_vm_ops,
 };
 
@@ -258,7 +303,7 @@ static int apple_drm_gem_map_nomap_pool(struct drm_gem_dma_object *dma_obj)
 	obj->pool_dma_addr = pool_dma;
 	obj->pool_fixed_iova = true;
 	dma_obj->dma_addr = iova;
-	dev_info(dev, "pre-mapped no-map scanout buffer: phys %pa -> iova %pad (%zu bytes)\n",
+	dev_dbg(dev, "pre-mapped no-map scanout buffer: phys %pa -> iova %pad (%zu bytes)\n",
 		 &phys, &iova, dma_obj->base.size);
 	return 0;
 }
@@ -267,7 +312,7 @@ DEFINE_DRM_GEM_DMA_FOPS(apple_fops);
 
 #define DART_PAGE_SIZE 16384
 
-static struct drm_gem_dma_object *
+struct drm_gem_dma_object *
 apple_drm_gem_create_scanout(struct drm_device *drm, size_t size)
 {
 	struct drm_gem_dma_object *dma_obj;
@@ -310,10 +355,78 @@ static int apple_drm_gem_dumb_create(struct drm_file *file_priv,
 	return ret;
 }
 
+static struct drm_gem_object *
+apple_drm_prime_import(struct drm_device *drm, struct dma_buf *buf)
+{
+	struct apple_drm_gem_object *obj;
+	struct dma_buf_attachment *attach;
+	struct iosys_map map;
+	int ret;
+
+	if (!of_property_read_bool(drm->dev->of_node, "apple,scanout-memory-is-nomap") ||
+	    drm_gem_is_prime_exported_dma_buf(drm, buf))
+		return drm_gem_prime_import(drm, buf);
+
+	/*
+	 * Foreign buffers are CPU readers here, never realtime-DART DMA
+	 * mappings. Each committed plane receives a separate owned scanout.
+	 */
+	attach = dma_buf_attach(buf, drm->dev);
+	if (IS_ERR(attach))
+		return ERR_CAST(attach);
+	get_dma_buf(buf);
+	ret = dma_buf_vmap_unlocked(buf, &map);
+	if (ret)
+		goto err_detach;
+	if (map.is_iomem) {
+		ret = -EOPNOTSUPP;
+		goto err_vunmap;
+	}
+	obj = kzalloc_obj(*obj);
+	if (!obj) {
+		ret = -ENOMEM;
+		goto err_vunmap;
+	}
+	obj->dma.base.funcs = &apple_drm_gem_funcs;
+	drm_gem_private_object_init(drm, &obj->dma.base, buf->size);
+	obj->cpu_import = true;
+	obj->dma.vaddr = map.vaddr;
+	obj->dma.base.import_attach = attach;
+	obj->dma.base.resv = buf->resv;
+	ret = drm_gem_create_mmap_offset(&obj->dma.base);
+	if (ret) {
+		drm_gem_object_put(&obj->dma.base);
+		return ERR_PTR(ret);
+	}
+	return &obj->dma.base;
+
+err_vunmap:
+	dma_buf_vunmap_unlocked(buf, &map);
+err_detach:
+	dma_buf_detach(buf, attach);
+	dma_buf_put(buf);
+	return ERR_PTR(ret);
+}
+
+int apple_drm_gem_copy_import(struct drm_gem_dma_object *src,
+			      struct drm_gem_dma_object *dst)
+{
+	struct dma_buf *buf = src->base.import_attach->dmabuf;
+	int ret;
+
+	ret = dma_buf_begin_cpu_access(buf, DMA_FROM_DEVICE);
+	if (ret)
+		return ret;
+	memcpy_toio((void __iomem *)dst->vaddr, src->vaddr, src->base.size);
+	dma_wmb();
+	return dma_buf_end_cpu_access(buf, DMA_FROM_DEVICE);
+}
+
 static const struct drm_driver apple_drm_driver = {
 	DRM_GEM_DMA_DRIVER_OPS_VMAP_WITH_DUMB_CREATE(apple_drm_gem_dumb_create),
 	DRM_FBDEV_DMA_DRIVER_OPS,
 	.gem_create_object	= apple_drm_gem_create_object,
+	.gem_prime_import	= apple_drm_prime_import,
 	.name			= DRIVER_NAME,
 	.desc			= DRIVER_DESC,
 	.major			= 1,
@@ -1046,3 +1159,5 @@ module_exit(appledrm_unregister);
 MODULE_AUTHOR("Asahi Linux contributors");
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("Dual MIT/GPL");
+
+MODULE_IMPORT_NS("DMA_BUF");
