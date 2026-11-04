@@ -11,6 +11,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/gpio/consumer.h>
 #include <linux/iommu.h>
+#include <linux/iopoll.h>
 #include <linux/jiffies.h>
 #include <linux/kconfig.h>
 #include <linux/kernel.h>
@@ -20,6 +21,8 @@
 #include <linux/of_device.h>
 #include <linux/of_platform.h>
 #include <linux/overflow.h>
+#include <linux/unaligned.h>
+#include <linux/pm_runtime.h>
 #include <linux/slab.h>
 #include <linux/soc/apple/rtkit.h>
 #include <linux/string.h>
@@ -48,6 +51,9 @@
 
 #define APPLE_DCP_COPROC_CPU_CONTROL	 0x44
 #define APPLE_DCP_COPROC_CPU_CONTROL_RUN BIT(4)
+#define APPLE_DCP_COPROC_CPU_STATUS 0x48
+#define APPLE_DCP_COPROC_CPU_STATUS_STOPPED BIT(1)
+#define APPLE_DCP_RETAINED_STOP_TIMEOUT_US 100000
 
 #define DCP_BOOT_TIMEOUT msecs_to_jiffies(1000)
 
@@ -249,6 +255,12 @@ static void dcp_recv_msg(void *cookie, u8 endpoint, u64 message)
 	struct apple_dcp *dcp = cookie;
 
 	trace_dcp_recv_msg(dcp, endpoint, message);
+	if (endpoint >= SYSTEM_ENDPOINT && endpoint < IOMFB_ENDPOINT &&
+	    dcp->diag_aux_eps[endpoint - SYSTEM_ENDPOINT]) {
+		afk_receive_message(
+			dcp->diag_aux_eps[endpoint - SYSTEM_ENDPOINT], message);
+		return;
+	}
 
 	switch (endpoint) {
 	case IOMFB_ENDPOINT:
@@ -453,6 +465,14 @@ static struct apple_rtkit_ops rtkit_ops = {
 	.recv_message = dcp_recv_msg,
 	.shmem_setup = dcp_rtk_shmem_setup,
 	.shmem_destroy = dcp_rtk_shmem_destroy,
+};
+
+static struct apple_rtkit_ops neo_rtkit_ops = {
+	.crashed = dcp_rtk_crashed,
+	.recv_message = dcp_recv_msg,
+	.shmem_setup = dcp_rtk_shmem_setup,
+	.shmem_destroy = dcp_rtk_shmem_destroy,
+	.quirks = APPLE_RTKIT_QUIRK_OSLOG_ACK,
 };
 
 void dcp_send_message(struct apple_dcp *dcp, u8 endpoint, u64 message)
@@ -855,6 +875,95 @@ static int dcp_compact_aux_call(struct apple_epic_service *service, u16 group,
 	return 0;
 }
 
+/* Initialize the Neo panel SAC service before starting IOMFB. */
+#define PANEL_SAC_CALLBACK_GROUP 1
+#define PANEL_SAC_CALLBACK_COMMAND 0
+#define PANEL_SAC_OPEN_COMMAND 7
+#define PANEL_SAC_OBSERVED_INITIAL_CALLBACKS 2
+static int panel_sac_call(struct apple_epic_service *service, u16 group,
+			  u32 command, const void *data, size_t size,
+			  void *reply, size_t reply_size)
+{
+	struct apple_dcp *dcp = service->ep->dcp;
+
+	if (group != PANEL_SAC_CALLBACK_GROUP ||
+	    command != PANEL_SAC_CALLBACK_COMMAND)
+		return dcp_compact_aux_call(service, group, command, data, size,
+					    reply, reply_size);
+	if (size < sizeof(__le32) || reply_size < size)
+		return -EMSGSIZE;
+	/*
+	 * Native replies preserve the opaque firmware table, clearing only the
+	 * leading word. Do not replay captured timing/calibration contents.
+	 */
+	memcpy(reply, data, size);
+	memset(reply, 0, sizeof(__le32));
+	dcp->panel_sac_callbacks++;
+	dev_info(
+		dcp->dev,
+		"panel SAC callback %u:%u bytes=%zu acknowledged preserving payload (%u)\n",
+		group, command, size, dcp->panel_sac_callbacks);
+	if (dcp->panel_sac_callbacks >= PANEL_SAC_OBSERVED_INITIAL_CALLBACKS)
+		complete(&dcp->panel_sac_callbacks_done);
+	return 0;
+}
+static void panel_sac_init(struct apple_epic_service *service, const char *name,
+			   const char *class, s64 unit)
+{
+	struct apple_dcp *dcp = service->ep->dcp;
+
+	service->defer_start = false;
+	dcp->panel_sac_service = service;
+	complete(&dcp->panel_sac_ready);
+}
+static const struct apple_epic_service_ops panel_sac_ops[] = {
+	{ .name = "dcpav-sac-epic",
+	  .init = panel_sac_init,
+	  .call = panel_sac_call },
+	{},
+};
+static int panel_sac_start(struct apple_dcp *dcp)
+{
+	u8 request[16] = { 0 }, response[16] = { 0 };
+	int ret;
+
+	if (dcp->dcpavservep)
+		return -EALREADY;
+	if (!apple_rtkit_has_endpoint(dcp->rtk, DPAVSERV_ENDPOINT))
+		return -ENODEV;
+	init_completion(&dcp->panel_sac_ready);
+	init_completion(&dcp->panel_sac_callbacks_done);
+	dcp->panel_sac_callbacks = 0;
+	dcp->dcpavservep = afk_init(dcp, DPAVSERV_ENDPOINT, panel_sac_ops);
+	if (IS_ERR(dcp->dcpavservep)) {
+		ret = PTR_ERR(dcp->dcpavservep);
+		dcp->dcpavservep = NULL;
+		return ret;
+	}
+	ret = afk_start(dcp->dcpavservep);
+	if (ret)
+		return ret;
+	if (!wait_for_completion_timeout(&dcp->panel_sac_ready,
+					 msecs_to_jiffies(1000)))
+		return -ETIMEDOUT;
+	flush_workqueue(dcp->dcpavservep->wq);
+	ret = afk_service_call(dcp->panel_sac_service, 0,
+			       PANEL_SAC_OPEN_COMMAND, request, sizeof(request),
+			       0, response, sizeof(response), 0);
+	dev_info(dcp->dev, "panel SAC native open returned %d reply=%*phN\n",
+		 ret, 16, response);
+	if (ret)
+		return ret;
+	if (!wait_for_completion_timeout(&dcp->panel_sac_callbacks_done,
+					 msecs_to_jiffies(1000)))
+		return -ETIMEDOUT;
+	flush_workqueue(dcp->dcpavservep->wq);
+	dev_info(
+		dcp->dev,
+		"panel SAC initialization callbacks complete before IOMFB start\n");
+	return 0;
+}
+
 static int dcp_hdcp_read_mprime(struct apple_dcp *dcp)
 {
 	__le64 request[12] = { 0 };
@@ -1149,6 +1258,29 @@ static int dcp_activate_dpavctrl(struct apple_dcp *dcp)
 {
 	int i, ret;
 
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_T8140 && dcp_has_panel(dcp)) {
+		u8 request[32] = {}, response[32] = {};
+
+		if (!dcp->dpavctrl_av_controller[1] ||
+		    !dcp->dpavctrl_late_service)
+			return -ENODEV;
+		ret = afk_service_call(dcp->dpavctrl_av_controller[1], 0, 12,
+				       request, sizeof(request), 0, response,
+				       sizeof(response), 0);
+		dev_info(
+			dcp->dev,
+			"private panel AV controller open result=%d reply=%*phN\n",
+			ret, 32, response);
+		if (ret)
+			return ret;
+		ret = afk_start_service(dcp->dpavctrl_late_service);
+		dev_info(
+			dcp->dev,
+			"private panel deferred DP controller start result=%d\n",
+			ret);
+		return ret;
+	}
+
 	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_T8140 && dcp->phy) {
 		u8 request[32] = { };
 
@@ -1176,6 +1308,253 @@ static int dcp_activate_dpavctrl(struct apple_dcp *dcp)
 		return -ENODEV;
 
 	return afk_start_service(dcp->dpavctrl_late_service);
+}
+
+static void dcp_panel_aux_init(struct apple_epic_service *service,
+			       const char *name, const char *class, s64 unit)
+{
+	/*
+	 * PRIVATE: start only the service classes observed starting natively.
+	 * Keep the test and disp0 notification services deferred.
+	 */
+	static const char *const native_classes[] = {
+		"dcpexpert-service",	     "md-manager",
+		"dcpav-power-epic",	     "dcpav-device-epic",
+		"dcpdp-device-epic",	     "dcpav-sac-epic",
+		"dcpav-video-interface-epi", "dcpav-service-epic",
+		"dcpdp-service-epic",	     "dcpdptx-hdcp-interface",
+	};
+	service->defer_start = true;
+	for (unsigned int i = 0; i < ARRAY_SIZE(native_classes); i++)
+		if (strstr(name, native_classes[i])) {
+			service->defer_start = false;
+			break;
+		}
+}
+
+static const struct apple_epic_service_ops dcp_panel_aux_ops[] = {
+	{ .name = "*",
+	  .init = dcp_panel_aux_init,
+	  .call = dcp_compact_aux_call },
+	{},
+};
+
+static struct apple_dcp_afkep *neo_existing_afk(struct apple_dcp *dcp, u32 ep)
+{
+	switch (ep) {
+	case SYSTEM_ENDPOINT:
+		return dcp->systemep;
+	case DCP_EXPERT_ENDPOINT:
+		return dcp->expertep;
+	case DISP0_ENDPOINT:
+		return dcp->ibootep;
+	case DPAVCTRL_ENDPOINT:
+		return dcp->dpavctrlep;
+	case EPIC25_ENDPOINT:
+		return dcp->epicep25;
+	case DPDEV_ENDPOINT:
+		return dcp->dpdevep;
+	case DPSAC_ENDPOINT:
+		return dcp->dpsacep;
+	case DPAVSERV_ENDPOINT:
+		return dcp->dcpavservep;
+	case AV_ENDPOINT:
+		return dcp->avauxep ?: dcp->avep;
+	case HDCP_ENDPOINT:
+		return dcp->hdcpep;
+	case EPIC2C_ENDPOINT:
+		return dcp->phy ? dcp->dptxep : dcp->epicep2c;
+	case REMOTE_ALLOC_ENDPOINT:
+		return dcp->remoteallocep;
+	default:
+		return NULL;
+	}
+}
+
+static int neo_diag_start_all(struct apple_dcp *dcp)
+{
+	int ret;
+
+	if (dcp->fw_compat != DCP_FIRMWARE_V_26_6_T8140)
+		return 0;
+	for (unsigned int ep = SYSTEM_ENDPOINT + 1; ep < IOMFB_ENDPOINT; ep++) {
+		struct apple_dcp_afkep **out =
+			&dcp->diag_aux_eps[ep - SYSTEM_ENDPOINT];
+		if (!apple_rtkit_has_endpoint(dcp->rtk, ep) ||
+		    neo_existing_afk(dcp, ep) || *out)
+			continue;
+		*out = afk_init(dcp, ep, dcp_panel_aux_ops);
+		if (IS_ERR(*out)) {
+			ret = PTR_ERR(*out);
+			*out = NULL;
+			return ret;
+		}
+		ret = afk_start(*out);
+		if (ret)
+			return ret;
+		flush_workqueue((*out)->wq);
+	}
+	dev_info(
+		dcp->dev,
+		"private all native AFK transports started with original AV/SAC owners retained\n");
+	return 0;
+}
+
+static int neo_diag_idle_protected_peer(void *cookie)
+{
+	return neo_diag_quiesce_unused_host(cookie);
+}
+static int neo_diag_idle_one(struct apple_dcp *dcp)
+{
+	int ret;
+
+	if (dcp->diag_idle_done)
+		return -EALREADY;
+	dcp->diag_idle_done = true;
+	ret = iomfb_panel_prepare_idle_v26_6_t8140(dcp);
+	if (ret)
+		return ret;
+	for (int ep = IOMFB_ENDPOINT - 1; ep >= SYSTEM_ENDPOINT; ep--) {
+		struct apple_dcp_afkep *afk = neo_existing_afk(dcp, ep);
+
+		if (!afk)
+			afk = dcp->diag_aux_eps[ep - SYSTEM_ENDPOINT];
+		if (!afk)
+			continue;
+		ret = afk_set_idle(afk, true);
+		if (ret)
+			return ret;
+		flush_workqueue(afk->wq);
+	}
+	ret = apple_rtkit_idle_with_peer(dcp->rtk, neo_diag_idle_protected_peer,
+					 dcp);
+	if (!ret)
+		ret = apple_rtkit_suspend_retained(dcp->rtk);
+	if (!ret) {
+		u32 status;
+
+		ret = readl_poll_timeout(
+			dcp->coproc_reg + APPLE_DCP_COPROC_CPU_STATUS, status,
+			status & APPLE_DCP_COPROC_CPU_STATUS_STOPPED, 10,
+			APPLE_DCP_RETAINED_STOP_TIMEOUT_US);
+		dev_info(
+			dcp->dev,
+			"private retained stop readiness status=%#x result=%d\n",
+			status, ret);
+	}
+	if (!ret) {
+		u32 control =
+			readl(dcp->coproc_reg + APPLE_DCP_COPROC_CPU_CONTROL);
+		writel(control & ~APPLE_DCP_COPROC_CPU_CONTROL_RUN,
+		       dcp->coproc_reg + APPLE_DCP_COPROC_CPU_CONTROL);
+		dev_info(dcp->dev, "private retained CPU stop: control=%#x\n",
+			 readl(dcp->coproc_reg + APPLE_DCP_COPROC_CPU_CONTROL));
+		{
+			ret = pm_runtime_put_sync_suspend(dcp->dev);
+			dev_info(
+				dcp->dev,
+				"private DCP domain suspend result=%d suspended=%u\n",
+				ret, pm_runtime_suspended(dcp->dev));
+			if (ret < 0)
+				return ret;
+		}
+		dcp->diag_idle_complete = true;
+	}
+	dev_info(dcp->dev,
+		 "private complete idle with matched service opens result=%d\n",
+		 ret);
+	return ret;
+}
+
+static int neo_diag_resume_one(struct apple_dcp *dcp)
+{
+	int ret;
+
+	if (!dcp->diag_idle_done)
+		return 0;
+	if (!dcp->diag_idle_complete)
+		return -EIO;
+	{
+		ret = pm_runtime_resume_and_get(dcp->dev);
+		dev_info(dcp->dev,
+			 "private DCP domain resume result=%d active=%u\n", ret,
+			 pm_runtime_active(dcp->dev));
+		if (ret < 0)
+			return ret;
+		ret = neo_diag_pmgr_order_status(dcp);
+		if (ret)
+			return ret;
+	}
+	ret = apple_rtkit_prepare_retained_resume(dcp->rtk);
+	if (ret)
+		return ret;
+	{
+		u32 control =
+			readl(dcp->coproc_reg + APPLE_DCP_COPROC_CPU_CONTROL);
+		writel(control | APPLE_DCP_COPROC_CPU_CONTROL_RUN,
+		       dcp->coproc_reg + APPLE_DCP_COPROC_CPU_CONTROL);
+		readl(dcp->coproc_reg + APPLE_DCP_COPROC_CPU_CONTROL);
+	}
+	ret = apple_rtkit_boot(dcp->rtk);
+	dev_info(dcp->dev,
+		 "private retained CPU restart/RTKit boot result=%d\n", ret);
+	if (ret)
+		return ret;
+	/*
+	 * CPU restart publishes a new HELLO to every host. Complete the unused
+	 * protected host handshake again before allowing display work to resume.
+	 */
+	if (dcp_has_panel(dcp)) {
+		ret = neo_diag_resume_unused_host(dcp);
+		dev_info(
+			dcp->dev,
+			"private protected host rehandshake after restart result=%d\n",
+			ret);
+		if (ret)
+			return ret;
+	}
+	for (int ep = SYSTEM_ENDPOINT; ep < IOMFB_ENDPOINT; ep++) {
+		struct apple_dcp_afkep *afk = neo_existing_afk(dcp, ep);
+
+		if (!afk)
+			afk = dcp->diag_aux_eps[ep - SYSTEM_ENDPOINT];
+		if (!afk)
+			continue;
+		ret = afk_set_idle(afk, false);
+		if (ret)
+			return ret;
+		flush_workqueue(afk->wq);
+	}
+	dcp->diag_idle_done = false;
+	dcp->diag_idle_complete = false;
+	dev_info(dcp->dev, "private retained transport resume complete\n");
+	return 0;
+}
+
+static int neo_diag_idle_secondary(void)
+{
+	struct device_node *n = of_find_node_by_path("/soc/dcp@416e00000");
+	struct platform_device *pdev;
+	struct apple_dcp *other;
+	int ret;
+
+	if (!n)
+		return -ENODEV;
+	pdev = of_find_device_by_node(n);
+	of_node_put(n);
+	if (!pdev)
+		return -ENODEV;
+	other = platform_get_drvdata(pdev);
+	if (!other || dcp_has_panel(other) || !other->connector ||
+	    other->connector->connected)
+		ret = -EBUSY;
+	else if (other->diag_idle_complete)
+		ret = 0;
+	else
+		ret = neo_diag_idle_one(other);
+	dev_info(&pdev->dev, "private secondary idle result=%d\n", ret);
+	put_device(&pdev->dev);
+	return ret;
 }
 
 int dcp_start(struct platform_device *pdev)
@@ -1214,6 +1593,25 @@ int dcp_start(struct platform_device *pdev)
 			return dev_err_probe(dcp->dev, ret,
 					     "Failed to start IOMFB transport endpoint\n");
 
+	}
+
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_T8140 && dcp_has_panel(dcp)) {
+		ret = dcp_start_dpavctrl(dcp);
+		if (!ret) {
+			flush_workqueue(dcp->dpavctrlep->wq);
+			ret = dcp_activate_dpavctrl(dcp);
+		}
+		if (ret)
+			dev_warn(
+				dcp->dev,
+				"private panel AV initialization incomplete: %d\n",
+				ret);
+		ret = panel_sac_start(dcp);
+		if (ret)
+			dev_warn(
+				dcp->dev,
+				"private panel SAC initialization incomplete: %d\n",
+				ret);
 	}
 
 	if (v26_6 && dcp->fw_compat != DCP_FIRMWARE_V_26_6_T8140) {
@@ -1383,6 +1781,9 @@ int dcp_start(struct platform_device *pdev)
 		dev_warn(dcp->dev, "OS firmware incompatible with dptxport EP\n");
 	}
 
+	ret = neo_diag_start_all(dcp);
+	if (ret)
+		return ret;
 	ret = iomfb_start_rtkit(dcp);
 	if (ret)
 		dev_err(dcp->dev, "Failed to start IOMFB endpoint: %d\n", ret);
@@ -1461,8 +1862,12 @@ int dcp_wait_ready(struct platform_device *pdev, u64 timeout)
 
 	if (dcp->crashed)
 		return -ENODEV;
-	if (dcp->active)
+	if (dcp->active) {
+		ret = neo_diag_display_transport_init(dcp);
+		if (ret)
+			return ret;
 		return dcp_enable_dp2hdmi_hpd(dcp);
+	}
 	if (timeout <= 0)
 		return -ETIMEDOUT;
 
@@ -1473,8 +1878,12 @@ int dcp_wait_ready(struct platform_device *pdev, u64 timeout)
 	if (dcp->crashed)
 		return -ENODEV;
 
-	if (dcp->active)
+	if (dcp->active) {
+		ret = neo_diag_display_transport_init(dcp);
+		if (ret)
+			return ret;
 		dcp_enable_dp2hdmi_hpd(dcp);
+	}
 
 	return dcp->active ? 0 : -ETIMEDOUT;
 }
@@ -1506,6 +1915,16 @@ static void __maybe_unused dcp_sleep(struct apple_dcp *dcp)
 void dcp_poweron(struct platform_device *pdev)
 {
 	struct apple_dcp *dcp = platform_get_drvdata(pdev);
+	if (dcp->diag_idle_done) {
+		int ret = neo_diag_resume_one(dcp);
+
+		if (ret) {
+			dev_err(dcp->dev,
+				"private retained resume failed: %d; reboot required\n",
+				ret);
+			return;
+		}
+	}
 
 	if (dcp->hotplug_keepalive) {
 		dev_info(dcp->dev,
@@ -1551,6 +1970,8 @@ void dcp_poweron(struct platform_device *pdev)
 void dcp_poweroff(struct platform_device *pdev)
 {
 	struct apple_dcp *dcp = platform_get_drvdata(pdev);
+	if (dcp->diag_idle_done)
+		return;
 
 	/*
 	 * Keep the 26.6 external IOMFB instance alive while isolating the HPD
@@ -1572,6 +1993,16 @@ void dcp_poweroff(struct platform_device *pdev)
 		av_service_disconnect(dcp);
 
 	_dcp_poweroff(dcp);
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_T8140 && dcp_has_panel(dcp) &&
+	    !dcp->diag_idle_done) {
+		int idle_result = neo_diag_idle_secondary();
+
+		if (!idle_result)
+			idle_result = neo_diag_idle_one(dcp);
+		dev_info(dcp->dev,
+			 "private off-only matched-open idle overall=%d\n",
+			 idle_result);
+	}
 
 	if (dcp->hdmi_hpd) {
 		bool connected = gpiod_get_value_cansleep(dcp->hdmi_hpd);
@@ -1988,13 +2419,34 @@ static int dcp_comp_bind(struct device *dev, struct device *main, void *data)
 		       dcp->coproc_reg + APPLE_DCP_COPROC_CPU_CONTROL);
 	readl_relaxed(dcp->coproc_reg + APPLE_DCP_COPROC_CPU_CONTROL);
 
-	dcp->rtk = devm_apple_rtkit_init(dev, dcp, "mbox", 0, &rtkit_ops);
+	dcp->rtk = devm_apple_rtkit_init(
+		dev, dcp, "mbox", 0,
+		dcp->fw_compat == DCP_FIRMWARE_V_26_6_T8140 ? &neo_rtkit_ops :
+							      &rtkit_ops);
 	if (IS_ERR(dcp->rtk))
 		return dev_err_probe(dev, PTR_ERR(dcp->rtk),
 				     "Failed to initialize RTKit\n");
 	/* The crash callback can run before dcp_start() initializes IOMFB. */
 	init_completion(&dcp->start_done);
 	init_waitqueue_head(&dcp->swap_ack_wait);
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_T8140) {
+		pm_runtime_get_noresume(dev);
+		ret = pm_runtime_set_active(dev);
+		if (ret) {
+			pm_runtime_put_noidle(dev);
+			return ret;
+		}
+		ret = devm_pm_runtime_enable(dev);
+		if (ret) {
+			pm_runtime_put_noidle(dev);
+			return ret;
+		}
+		if (dcp_has_panel(dcp)) {
+			ret = neo_diag_pmgr_order_init(dcp);
+			if (ret)
+				return ret;
+		}
+	}
 
 	return 0;
 }
@@ -2035,6 +2487,12 @@ static void dcp_comp_unbind(struct device *dev, struct device *main, void *data)
 		dcp->avauxep = NULL;
 	}
 
+	for (unsigned int i = 0; i < ARRAY_SIZE(dcp->diag_aux_eps); i++) {
+		if (dcp->diag_aux_eps[i]) {
+			afk_shutdown(dcp->diag_aux_eps[i]);
+			dcp->diag_aux_eps[i] = NULL;
+		}
+	}
 	if (dcp->dpavctrlep) {
 		afk_shutdown(dcp->dpavctrlep);
 		dcp->dpavctrlep = NULL;

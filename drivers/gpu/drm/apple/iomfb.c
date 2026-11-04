@@ -284,7 +284,8 @@ static void dcpep_handle_cb(struct apple_dcp *dcp, enum dcp_context_id context,
 
 	// TODO: verify that in_len and out_len match our prototypes
 	// for now just clear the out data to have at least consistent results
-	if (hdr->out_len)
+	if (hdr->out_len &&
+	    !(dcp->fw_compat == DCP_FIRMWARE_V_26_6_T8140 && tag == 575))
 		memset(out, 0, hdr->out_len);
 
 	depth = dcp_push_depth(&ch->depth);
@@ -309,24 +310,44 @@ static void dcpep_handle_ack(struct apple_dcp *dcp, enum dcp_context_id context,
 {
 	struct dcp_packet_header *header = data;
 	struct dcp_channel *ch = dcp_get_channel(dcp, context);
-	void *cookie;
+	void *cookie, *reply;
 	dcp_callback_t cb;
 
-	if (!ch) {
+	if (!ch || !ch->depth) {
 		dev_warn(dcp->dev, "ignoring ack on context %X\n", context);
 		return;
 	}
 
 	dcp_pop_depth(&ch->depth);
 
+	/*
+	 * On Neo 26.6 the ACK repeats the call context but carries offset zero.
+	 * A nested host call lives in TX memory at a nonzero stack offset;
+	 * data points into the callback RX region for callback contexts.
+	 * Consume the exact output pointer saved when submitting this call.
+	 */
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_T8140) {
+		reply = ch->output[ch->depth];
+		if (!reply) {
+			dev_err(dcp->dev,
+				"missing pending Neo RPC output on context %u\n",
+				context);
+			return;
+		}
+
+	} else {
+		reply = data + sizeof(*header) + header->in_len;
+	}
+
 	cb = ch->callbacks[ch->depth];
 	cookie = ch->cookies[ch->depth];
 
 	ch->callbacks[ch->depth] = NULL;
 	ch->cookies[ch->depth] = NULL;
+	ch->output[ch->depth] = NULL;
 
 	if (cb)
-		cb(dcp, data + sizeof(*header) + header->in_len, cookie);
+		cb(dcp, reply, cookie);
 }
 
 static void dcpep_got_msg(struct apple_dcp *dcp, u64 message)

@@ -12,7 +12,7 @@
 
 static const struct dcp_method_entry dcp_methods[dcpep_num_methods] = {
 	IOMFB_METHOD("A000", dcpep_late_init_signal),
-	IOMFB_METHOD("A029", dcpep_setup_video_limits),
+	IOMFB_METHOD("A025", dcpep_setup_video_limits),
 	IOMFB_METHOD("A131", iomfbep_a131_pmu_service_matched),
 	IOMFB_METHOD("A132", iomfbep_a132_backlight_service_matched),
 	IOMFB_METHOD("A385", dcpep_set_create_dfb),
@@ -33,6 +33,7 @@ static const struct dcp_method_entry dcp_methods[dcpep_num_methods] = {
 	IOMFB_METHOD("A465", dcpep_set_display_refresh_properties),
 	IOMFB_METHOD("A468", dcpep_flush_supports_power),
 	IOMFB_METHOD("A469", iomfbep_abort_swaps_dcp),
+	IOMFB_METHOD("A472", iomfbep_update_dfb),
 	IOMFB_METHOD("A473", dcpep_set_power_state),
 };
 
@@ -41,6 +42,34 @@ static const struct dcp_method_entry dcp_methods[dcpep_num_methods] = {
 #define DCP_FW_VER DCP_FW_VERSION(26, 6, 0)
 
 #include "iomfb_template.c"
+
+int iomfb_panel_prepare_idle_v26_6_t8140(struct apple_dcp *dcp)
+{
+	static const struct dcp_method_entry prepare_idle = {
+		.name = "dcpep_panel_prepare_idle",
+		.tag = { 'A', '5', '0', '0' },
+	};
+	/*
+	 * Captured internal-panel sleep request; the last two bytes are padding.
+	 * It follows A473(0) and precedes the retained RTKit idle handshake.
+	 */
+	const u8 request[4] = { 0, 0, 0xaa, 0xaa };
+	struct dcp_wait_cookie *cookie;
+	unsigned long remaining;
+
+	cookie = kzalloc(sizeof(*cookie), GFP_KERNEL);
+	if (!cookie)
+		return -ENOMEM;
+	init_completion(&cookie->done);
+	kref_init(&cookie->refcount);
+	kref_get(&cookie->refcount);
+	dcp_push(dcp, false, &prepare_idle, sizeof(request), 0, (void *)request,
+		 dcp_on_final, cookie);
+	remaining = wait_for_completion_timeout(&cookie->done,
+						msecs_to_jiffies(1000));
+	kref_put(&cookie->refcount, release_wait_cookie);
+	return remaining ? 0 : -ETIMEDOUT;
+}
 
 struct dcp_dict_passthrough_req_v26_6 {
 	u8 key[0x40];
@@ -133,7 +162,7 @@ static bool trampoline_rt_bandwidth_t8140(struct apple_dcp *dcp, int tag,
 	return true;
 }
 
-/* D574 returns an opaque 64-bit token; zero means no host-side token. */
+/* Preserve the verified zero-valued reply to this metadata query. */
 static bool trampoline_power_up_dart_t8140(struct apple_dcp *dcp, int tag,
 					  void *out, void *in)
 {
@@ -141,8 +170,75 @@ static bool trampoline_power_up_dart_t8140(struct apple_dcp *dcp, int tag,
 	return true;
 }
 
+static bool trampoline_scanout_clock_t8140(struct apple_dcp *dcp, int tag,
+					   void *out, void *in)
+{
+	u8 enable = *(u8 *)in;
+	int ret = enable <= 1 ? 0 : -EINVAL;
+
+	trace_iomfb_callback(dcp, tag, "power_up_scanout_dart_clock");
+	put_unaligned_le32(ret, out);
+	return true;
+}
+
+/*
+ * D400 is a provider-property copy: 3072 output bytes plus u32 length.
+ * Serve exact data from the owned diagnostic DT child. Never synthesize
+ * calibration values or replay native uninitialized output padding.
+ */
+struct neo_provider_property_request {
+	u8 object[4];
+	char key[64];
+	u32 capacity;
+	u8 value_null, length_null, padding[2];
+} __packed;
+struct neo_provider_property_reply {
+	u8 value[3072];
+	u32 length;
+} __packed;
+static_assert(sizeof(struct neo_provider_property_request) == 76);
+static_assert(sizeof(struct neo_provider_property_reply) == 3076);
+static bool trampoline_provider_property_t8140(struct apple_dcp *dcp, int tag,
+					       void *out, void *in)
+{
+	const struct neo_provider_property_request *req = in;
+	struct neo_provider_property_reply *resp = out;
+	struct device_node *provider;
+	const void *value;
+	int size = 0;
+
+	trace_iomfb_callback(dcp, tag, "get_provider_property_from_dt");
+	if (memcmp(req->object, "VORP", 4) ||
+	    !memchr(req->key, 0, sizeof(req->key)) ||
+	    req->capacity > sizeof(resp->value) || req->value_null ||
+	    req->length_null)
+		return true;
+	provider = of_get_child_by_name(dcp->dev->of_node,
+					"apple,provider-properties");
+	if (!provider)
+		return true;
+	value = of_get_property(provider, req->key, &size);
+	if (value && size > 0 && size <= req->capacity) {
+		memcpy(resp->value, value, size);
+		resp->length = size;
+	}
+	dev_info(dcp->dev,
+		 "private provider property %s capacity=%u returned=%u\n",
+		 req->key, req->capacity, resp->length);
+	of_node_put(provider);
+	return true;
+}
+
+static bool trampoline_hotplug_notify_t8140(struct apple_dcp *dcp, int tag,
+					    void *out, void *in)
+{
+	trace_iomfb_callback(dcp, tag, "hotplug_notification_preserve_output");
+	dcpep_cb_hotplug_state(dcp, get_unaligned_le64(in));
+	return true;
+}
+
 static const iomfb_cb_handler cb_handlers[IOMFB_MAX_CB] = {
-	[0] = trampoline_true,
+	[0] = trampoline_native_boot_capability,
 	[1] = trampoline_true,
 	[2] = trampoline_nop,
 	[3] = trampoline_rt_bandwidth_t8140,
@@ -175,7 +271,7 @@ static const iomfb_cb_handler cb_handlers[IOMFB_MAX_CB] = {
 	[208] = trampoline_nop,
 	[209] = trampoline_get_time,
 	[300] = trampoline_pr_publish,
-	[400] = trampoline_nop,
+	[400] = trampoline_provider_property_t8140,
 	[401] = trampoline_get_uint_prop,
 	[406] = trampoline_nop, /* set_fx_prop: host property notification */
 	[408] = trampoline_get_frequency,
@@ -190,12 +286,12 @@ static const iomfb_cb_handler cb_handlers[IOMFB_MAX_CB] = {
 	[565] = trampoline_true,
 	[567] = trampoline_true,
 	/* Native 26.6 returns a zero status for both start and stop events. */
-	[572] = trampoline_zero,
+	[572] = trampoline_scanout_clock_t8140,
 	[574] = trampoline_power_up_dart_t8140,
-	[575] = trampoline_hotplug,
+	[575] = trampoline_hotplug_notify_t8140,
 	[576] = trampoline_nop,
 	[581] = trampoline_nop,
-	[582] = trampoline_true, /* create_default_fb_surface */
+	[582] = trampoline_create_default_fb, /* create_default_fb_surface */
 	[590] = trampoline_swap_complete,
 	[592] = trampoline_swap_complete_intent_gated,
 	[594] = trampoline_nop, /* native display re-enable notification: empty ACK */

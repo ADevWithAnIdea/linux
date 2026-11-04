@@ -13,7 +13,9 @@
 #include <linux/iommu.h>
 #include <linux/kref.h>
 #include <linux/module.h>
+#include <linux/log2.h>
 #include <linux/of_device.h>
+#include <linux/of.h>
 #include <linux/pm_runtime.h>
 #include <linux/slab.h>
 #include <linux/unaligned.h>
@@ -179,6 +181,8 @@ static dcp_abort_swaps_req_t dcp_abort_swaps_request(struct apple_dcp *dcp)
 struct dcp_wait_cookie {
 	struct kref refcount;
 	struct completion done;
+	int error;
+	void (*panel_preflight_done)(struct apple_dcp *, void *, void *);
 };
 
 static void release_wait_cookie(struct kref *ref)
@@ -240,6 +244,126 @@ DCP_THUNK_INOUT(dcp_enable_disable_video_power_savings,
 		dcpep_enable_disable_video_power_savings, u32, int);
 
 DCP_THUNK_OUT(dcp_is_main_display, dcpep_is_main_display, u32);
+
+#ifdef DCP_FW_T8140
+/*
+ * Private diagnostic: metadata update uses the existing Asahi Interchange
+ * layout calculation. RGB tiles are 16x16 and have eight metadata bytes;
+ * metadata dimensions round up to powers of two. No captured dimensions.
+ */
+#define NEO_DFB_IX_TILE_PIXELS 16U
+#define NEO_DFB_IX_METADATA_BYTES 8U
+#define NEO_DFB_IX_PIXEL_BYTES 4U
+#define NEO_DFB_IX_METADATA_ALIGNMENT 16U
+struct neo_dfb_update_req {
+	struct DCP_FW_NAME(dcp_surface) surface;
+	u8 surface_null;
+	u8 padding[3];
+} __packed;
+struct neo_dfb_create_req {
+	u32 width;
+	u32 height;
+} __packed;
+static_assert(sizeof(struct neo_dfb_update_req) == 560);
+static_assert(sizeof(struct neo_dfb_create_req) == 8);
+DCP_THUNK_INOUT(neo_update_dfb, iomfbep_update_dfb, struct neo_dfb_update_req,
+		u32);
+static void neo_default_fb_updated(struct apple_dcp *dcp, void *out,
+				   void *cookie)
+{
+	struct dcp_channel *ch = &dcp->ch_cb;
+	u32 result = get_unaligned((u32 *)out);
+	u8 *success = ch->output[ch->depth - 1];
+	*success = result != 0;
+	dev_info(dcp->dev, "private DFB metadata update returned %u\n", result);
+	dcp_ack(dcp, DCP_CONTEXT_CB);
+}
+static bool trampoline_create_default_fb(struct apple_dcp *dcp, int tag,
+					 void *out, void *in)
+{
+	const struct neo_dfb_create_req *req = in;
+	struct neo_dfb_update_req update = { 0 };
+	u64 tiles_x, tiles_y, metadata_x, metadata_y, size;
+
+	trace_iomfb_callback(dcp, tag, "create_default_fb_with_metadata");
+	if (!dcp_has_panel(dcp)) {
+		*(u8 *)out = true;
+		return true;
+	}
+	if (!req->width || !req->height || req->width > U16_MAX ||
+	    req->height > U16_MAX) {
+		*(u8 *)out = false;
+		return true;
+	}
+	tiles_x = DIV_ROUND_UP(req->width, NEO_DFB_IX_TILE_PIXELS);
+	tiles_y = DIV_ROUND_UP(req->height, NEO_DFB_IX_TILE_PIXELS);
+	metadata_x = DIV_ROUND_UP(roundup_pow_of_two(req->width),
+				  NEO_DFB_IX_TILE_PIXELS);
+	metadata_y = DIV_ROUND_UP(roundup_pow_of_two(req->height),
+				  NEO_DFB_IX_TILE_PIXELS);
+	size = PAGE_ALIGN(
+		tiles_x * tiles_y * NEO_DFB_IX_TILE_PIXELS *
+			NEO_DFB_IX_TILE_PIXELS * NEO_DFB_IX_PIXEL_BYTES +
+		ALIGN(metadata_x * metadata_y * NEO_DFB_IX_METADATA_BYTES,
+		      NEO_DFB_IX_METADATA_ALIGNMENT));
+	if (size > U32_MAX) {
+		*(u8 *)out = false;
+		return true;
+	}
+	update.surface.base.is_premultiplied = 1;
+	update.surface.base.format = DCP_FORMAT_BGRA;
+	update.surface.base.pix_size = 1;
+	update.surface.base.pel_w = 1;
+	update.surface.base.pel_h = 1;
+	update.surface.base.buf_size = size;
+	update.surface.base.has_comp = 1;
+	update.surface.base.has_planes = 1;
+	if (!dcp->crtc || !dcp->crtc->base.primary) {
+		dev_err(dcp->dev,
+			"DFB metadata has no owning DRM primary plane\n");
+		*(u8 *)out = false;
+		return true;
+	}
+	update.surface.base.surface_id = dcp->crtc->base.primary->base.id;
+	if (!update.surface.base.surface_id) {
+		*(u8 *)out = false;
+		return true;
+	}
+	dev_info(
+		dcp->dev,
+		"private DFB %ux%u allocation=%#llx surface=%u metadata only\n",
+		req->width, req->height, size, update.surface.base.surface_id);
+	neo_update_dfb(dcp, false, &update, neo_default_fb_updated, NULL);
+	return false;
+}
+#endif
+
+#ifdef DCP_FW_T8140
+static const struct dcp_method_entry neo_boot_capability = {
+	.name = "native_early_boot_capability",
+	.tag = { 'A', '0', '3', '3' },
+};
+static void neo_boot_capability_done(struct apple_dcp *dcp, void *out,
+				     void *cookie)
+{
+	struct dcp_channel *ch = &dcp->ch_cb;
+	u8 *success = ch->output[ch->depth - 1];
+
+	dev_info(dcp->dev,
+		 "early A033 capability reply=%*phN cmd_depth=%u cb_depth=%u\n",
+		 4, out, dcp->ch_cmd.depth, dcp->ch_cb.depth);
+	*success = true;
+	dcp_ack(dcp, DCP_CONTEXT_CB);
+}
+static bool trampoline_native_boot_capability(struct apple_dcp *dcp, int tag,
+					      void *out, void *in)
+{
+	trace_iomfb_callback(dcp, tag, "native_boot_capability_query");
+	dcp_push(dcp, false, &neo_boot_capability, 0, 4, NULL,
+		 neo_boot_capability_done, NULL);
+	return false;
+}
+#endif
 
 /* DCP callback handlers */
 static void dcpep_cb_nop(struct apple_dcp *dcp)
@@ -843,8 +967,13 @@ static void boot_5(struct apple_dcp *dcp, void *out, void *cookie)
 static void boot_4(struct apple_dcp *dcp, void *out, void *cookie)
 {
 #if DCP_FW_VER >= DCP_FW_VERSION(13, 2, 0)
-	dcp_bool_arg_t v_true = dcp_bool_arg(true);
-	dcp_late_init_signal(dcp, false, &v_true, boot_5, NULL);
+#ifdef DCP_FW_T8140
+	/* Runtime macOS 26.6 cold startup passes false on the Neo. */
+	dcp_bool_arg_t late_init = dcp_bool_arg(false);
+#else
+	dcp_bool_arg_t late_init = dcp_bool_arg(true);
+#endif
+	dcp_late_init_signal(dcp, false, &late_init, boot_5, NULL);
 #else
 	dcp_late_init_signal(dcp, false, boot_5, NULL);
 #endif
@@ -857,8 +986,134 @@ static void boot_3(struct apple_dcp *dcp, void *out, void *cookie)
 	dcp_flush_supports_power(dcp, false, &v_true, boot_4, NULL);
 }
 
+#ifdef DCP_FW_T8140
+/*
+ * Public IOMFB get_display_size/set_config_frame_size/program_config_frame_size.
+ * Derive dimensions from this firmware, before the FIRST setup_video_limits.
+ */
+static const struct dcp_method_entry panel_frame_query = {
+	.name = "get_display_size",
+	.tag = { 'A', '4', '4', '5' },
+};
+static const struct dcp_method_entry panel_frame_set = {
+	.name = "set_config_frame_size",
+	.tag = { 'A', '1', '0', '4' },
+};
+static const struct dcp_method_entry panel_frame_program = {
+	.name = "program_config_frame_size",
+	.tag = { 'A', '1', '0', '5' },
+};
+static void panel_frame_programmed(struct apple_dcp *dcp, void *out,
+				   void *cookie)
+{
+	dev_info(dcp->dev, "cold panel frame programming acknowledged\n");
+	dcp_setup_video_limits(dcp, false, boot_3, NULL);
+}
+static void panel_frame_written(struct apple_dcp *dcp, void *out, void *cookie)
+{
+	dcp_push(dcp, false, &panel_frame_program, 0, 0, NULL,
+		 panel_frame_programmed, NULL);
+}
+static void panel_frame_queried(struct apple_dcp *dcp, void *out, void *cookie)
+{
+	struct {
+		__le32 width;
+		__le32 height;
+	} req = {
+		cpu_to_le32(get_unaligned_le32(out)),
+		cpu_to_le32(get_unaligned_le32(out + 4)),
+	};
+	if ((!le32_to_cpu(req.width) || !le32_to_cpu(req.height)) &&
+	    dcp->modes && dcp->nr_modes == 1) {
+		req.width = cpu_to_le32(dcp->modes[0].mode.hdisplay);
+		req.height = cpu_to_le32(dcp->modes[0].mode.vdisplay);
+		dev_info(dcp->dev,
+			 "using the sole firmware-advertised panel timing\n");
+	}
+	if (!le32_to_cpu(req.width) || !le32_to_cpu(req.height)) {
+		struct device_node *fb = of_find_compatible_node(
+			NULL, NULL, "simple-framebuffer");
+		u32 width = 0, height = 0;
+
+		if (fb) {
+			of_property_read_u32(fb, "width", &width);
+			of_property_read_u32(fb, "height", &height);
+			of_node_put(fb);
+		}
+		if (width && height && width <= U16_MAX && height <= U16_MAX) {
+			req.width = cpu_to_le32(width);
+			req.height = cpu_to_le32(height);
+			dev_info(
+				dcp->dev,
+				"cold panel dimensions from the boot framebuffer\n");
+		}
+	}
+	if (!le32_to_cpu(req.width) || !le32_to_cpu(req.height)) {
+		dev_warn(
+			dcp->dev,
+			"no valid firmware or handoff frame dimensions; preserving old boot path\n");
+		dcp_setup_video_limits(dcp, false, boot_3, NULL);
+		return;
+	}
+	dev_info(dcp->dev, "cold panel frame %ux%u BEFORE first video limits\n",
+		 le32_to_cpu(req.width), le32_to_cpu(req.height));
+	dcp_push(dcp, false, &panel_frame_set, sizeof(req), 0, &req,
+		 panel_frame_written, NULL);
+}
+static const struct dcp_method_entry panel_dfb_compression = {
+	.name = "get_dfb_compression_info",
+	.tag = { 'A', '0', '3', '5' },
+};
+static const struct dcp_method_entry panel_dfb_info = {
+	.name = "get_dfb_info",
+	.tag = { 'A', '0', '3', '4' },
+};
+static const struct dcp_method_entry panel_config_query = {
+	.name = "get_config_frame_size",
+	.tag = { 'A', '1', '0', '3' },
+};
+static void panel_config_queried(struct apple_dcp *dcp, void *out, void *cookie)
+{
+	const u8 outputs[4] = { 0, 0, 0xaa, 0xaa };
+
+	dev_info(dcp->dev, "cold config query returned %*phN\n", 8, out);
+	dcp_push(dcp, false, &panel_frame_query, 4, 8, (void *)outputs,
+		 panel_frame_queried, NULL);
+}
+static void panel_dfb_queried(struct apple_dcp *dcp, void *out, void *cookie)
+{
+	const u8 request[12] = { [10] = 0xaa, [11] = 0xaa };
+
+	dev_info(dcp->dev, "cold DFB metadata returned %*phN\n", 44, out);
+	dcp_push(dcp, false, &panel_config_query, sizeof(request), 8,
+		 (void *)request, panel_config_queried, NULL);
+}
+static void panel_compression_queried(struct apple_dcp *dcp, void *out,
+				      void *cookie)
+{
+	const u8 request[44] = { [41 ... 43] = 0xaa };
+
+	dev_info(dcp->dev, "cold DFB compression returned %*phN\n", 8, out);
+	dcp_push(dcp, false, &panel_dfb_info, sizeof(request), 44,
+		 (void *)request, panel_dfb_queried, NULL);
+}
+#endif
+
 static void boot_2(struct apple_dcp *dcp, void *out, void *cookie)
 {
+#ifdef DCP_FW_T8140
+	if (dcp_has_panel(dcp)) {
+		dev_info(
+			dcp->dev,
+			"cold create_default_fb reply=%*phN cmd_depth=%u cb_depth=%u\n",
+			4, out, dcp->ch_cmd.depth, dcp->ch_cb.depth);
+		const u8 request[8] = { [5 ... 7] = 0xaa };
+
+		dcp_push(dcp, false, &panel_dfb_compression, sizeof(request), 8,
+			 (void *)request, panel_compression_queried, NULL);
+		return;
+	}
+#endif
 	dcp_setup_video_limits(dcp, false, boot_3, NULL);
 }
 
@@ -923,7 +1178,18 @@ dcpep_cb_set_frame_sync_props(
 	struct dcp_set_frame_sync_props_resp_v26_6_0 resp;
 
 	memcpy(resp.props, req->props, sizeof(resp.props));
+#ifdef DCP_FW_T8140
+	/*
+	 * Bounded native D006 request/ACK comparisons preserve every other
+	 * in/out byte. These seven byte positions are always cleared.
+	 */
+	static const u8 native_cleared_bytes[] = { 65, 66, 68, 73, 74, 75, 76 };
+
+	for (unsigned int i = 0; i < ARRAY_SIZE(native_cleared_bytes); i++)
+		resp.props[native_cleared_bytes[i]] = 0;
+#else
 	memset(&resp.props[73], 0, 3);
+#endif
 	return resp;
 }
 #else
@@ -1008,6 +1274,60 @@ static void dcp_on_final(struct apple_dcp *dcp, void *out, void *cookie)
 static void dcp_on_set_parameter(struct apple_dcp *dcp, void *out,
 				 void *cookie);
 
+#ifdef DCP_FW_T8140
+/*
+ * Native internal-panel transitions use this preflight in both directions.
+ * The individual policy bits are not decoded: A476 takes a u32 value of one,
+ * and the following A478 ACK consistently contains a zero u32 before
+ * A412/A473 are issued. This is the reply, not the caller's output buffer.
+ */
+static const struct dcp_method_entry dcp_panel_a476 = {
+	.name = "dcpep_panel_a476",
+	.tag = { 'A', '4', '7', '6' },
+};
+
+static const struct dcp_method_entry dcp_panel_a478 = {
+	.name = "dcpep_panel_a478",
+	.tag = { 'A', '4', '7', '8' },
+};
+
+static void dcp_panel_preflight_checked(struct apple_dcp *dcp, void *out,
+					void *cookie)
+{
+	struct dcp_wait_cookie *wait = cookie;
+	u32 response = *(u32 *)out;
+
+	if (response != 0) {
+		dev_err(dcp->dev, "panel power preflight returned %u\n",
+			response);
+		wait->error = -EPROTO;
+		dcp_on_final(dcp, out, cookie);
+		return;
+	}
+	wait->panel_preflight_done(dcp, out, cookie);
+}
+
+static void dcp_panel_preflight_written(struct apple_dcp *dcp, void *out,
+					void *cookie)
+{
+	dcp_push(dcp, false, &dcp_panel_a478, 0, sizeof(u32), NULL,
+		 dcp_panel_preflight_checked, cookie);
+}
+
+static void dcp_panel_preflight(struct apple_dcp *dcp,
+				void (*next)(struct apple_dcp *, void *,
+					     void *),
+				void *cookie)
+{
+	struct dcp_wait_cookie *wait = cookie;
+	u32 policy = 1;
+
+	wait->panel_preflight_done = next;
+	dcp_push(dcp, false, &dcp_panel_a476, sizeof(policy), 0, &policy,
+		 dcp_panel_preflight_written, cookie);
+}
+#endif
+
 #if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
 static const struct dcp_method_entry dcp_prepare_wake_method = {
 	.name = "dcpep_prepare_wake",
@@ -1030,6 +1350,16 @@ static void dcp_on_set_power_state(struct apple_dcp *dcp, void *out, void *cooki
 #if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
 	u32 handle = dcp->main_display ? 0 : 2;
 
+#ifdef DCP_FW_T8140
+	/*
+	 * The fixed internal panel retains its display selection across DPMS.
+	 * Native panel wake completes A473 without selecting it again (A411).
+	 */
+	if (dcp_has_panel(dcp)) {
+		dcp_on_final(dcp, out, cookie);
+		return;
+	}
+#endif
 	dcp_set_display_device(dcp, false, &handle,
 			       dcp->main_display ? dcp_on_final : dcp_on_set_parameter,
 			       cookie);
@@ -1072,8 +1402,14 @@ static void dcp_poweron_after_main_display(struct apple_dcp *dcp, void *out,
 	dcp_power_state_req_t power_req =
 		dcp_power_state_req(1, DCP_POWER_TRANSITION_NONE);
 
-	dcp_set_power_state(dcp, false, &power_req, dcp_on_set_power_state,
-			    cookie);
+	/* Native Neo uses OOBCMD for power-on and CMD for power-off. */
+	dcp_set_power_state(dcp,
+#ifdef DCP_FW_T8140
+			    dcp_has_panel(dcp),
+#else
+			    false,
+#endif
+			    &power_req, dcp_on_set_power_state, cookie);
 }
 
 static void dcp_poweron_after_finish_wake(struct apple_dcp *dcp, void *out,
@@ -1089,11 +1425,96 @@ static void dcp_poweron_after_first_client(struct apple_dcp *dcp, void *out,
 		 dcp_poweron_after_finish_wake, cookie);
 }
 
+#ifdef DCP_FW_T8140
+static void panel_poweron_status2(struct apple_dcp *dcp, void *out,
+				  void *cookie)
+{
+	dcp_panel_preflight(dcp, dcp_poweron_after_finish_wake, cookie);
+}
+static void panel_poweron_finished(struct apple_dcp *dcp, void *out,
+				   void *cookie)
+{
+	dcp_push(dcp, false, &dcp_panel_a478, 0, 4, NULL, panel_poweron_status2,
+		 cookie);
+}
+static void panel_first_client_opened(struct apple_dcp *dcp, void *out,
+				      void *cookie)
+{
+	dcp->panel_client_opened = true;
+	dev_info(dcp->dev, "initial panel client opened once\n");
+	dcp_push(dcp, false, &dcp_finish_wake_method, 0, 4, NULL,
+		 panel_poweron_finished, cookie);
+}
+static void panel_poweron_status1(struct apple_dcp *dcp, void *out,
+				  void *cookie)
+{
+	if (!dcp->panel_client_opened)
+		dcp_first_client_open(dcp, false, panel_first_client_opened,
+				      cookie);
+	else
+		panel_poweron_finished(dcp, out, cookie);
+}
+#endif
+
 static void dcp_poweron_after_prepare_wake(struct apple_dcp *dcp, void *out,
 					   void *cookie)
 {
+#ifdef DCP_FW_T8140
+	if (dcp_has_panel(dcp)) {
+		dcp_push(dcp, false, &dcp_panel_a478, 0, 4, NULL,
+			 panel_poweron_status1, cookie);
+		return;
+	}
+#endif
 	dcp_first_client_open(dcp, false, dcp_poweron_after_first_client,
 			      cookie);
+}
+#endif
+
+#ifdef DCP_FW_T8140
+/*
+ * Runtime property 112 is named NormalModeActive by D104. Native A352
+ * requests 0/1 immediately cause the logged APT auto/normal transitions.
+ * Set the normal-mode policy once before the initial internal-panel poweron.
+ */
+#define NEO_PROPERTY_NORMAL_MODE_ACTIVE 112U
+struct neo_mode_property_request {
+	__le32 property;
+	__le32 value;
+} __packed;
+static const struct dcp_method_entry neo_apply_property = {
+	.name = "neo_apply_normal_mode_property",
+	.tag = { 'A', '3', '5', '2' },
+};
+static void panel_initial_normal_mode_applied(struct apple_dcp *dcp, void *out,
+					      void *cookie)
+{
+	const u8 prepare[8] = { 0, 0, 0, 0, 0, 0xaa, 0xaa, 0xaa };
+	u32 reply = get_unaligned_le32(out);
+	/*
+	 * Native A352(112,0) and A352(112,1) both acknowledge with zero.
+	 * Do not interpret the historical bool declaration as success=true.
+	 */
+	dev_info(dcp->dev, "private Neo NormalModeActive policy reply=%u\n",
+		 reply);
+	if (reply != 0) {
+		((struct dcp_wait_cookie *)cookie)->error = -EPROTO;
+		dcp_on_final(dcp, out, cookie);
+		return;
+	}
+	dcp_push(dcp, false, &dcp_prepare_wake_method, 8, 8, (void *)prepare,
+		 dcp_poweron_after_prepare_wake, cookie);
+}
+static void panel_initial_selection_done(struct apple_dcp *dcp, void *out,
+					 void *cookie)
+{
+	const struct neo_mode_property_request request = {
+		.property = cpu_to_le32(NEO_PROPERTY_NORMAL_MODE_ACTIVE),
+		.value = cpu_to_le32(1),
+	};
+	static_assert(sizeof(request) == 8);
+	dcp_push(dcp, false, &neo_apply_property, sizeof(request), 4,
+		 (void *)&request, panel_initial_normal_mode_applied, cookie);
 }
 #endif
 
@@ -1122,9 +1543,18 @@ void DCP_FW_NAME(iomfb_poweron)(struct apple_dcp *dcp)
 	 * external-display pipeline to sleep.  Omitting A414/A474, or selecting
 	 * the display before A473, leaves fControllerPowerState at zero and DCP
 	 * silently swallows every scanout swap. */
-	dcp_push(dcp, false, &dcp_prepare_wake_method, sizeof(prepare_wake),
-		 sizeof(u64), (void *)prepare_wake,
-		 dcp_poweron_after_prepare_wake, cookie);
+#ifdef DCP_FW_T8140
+	if (dcp_has_panel(dcp) && !dcp->panel_client_opened) {
+		u32 handle = dcp->main_display ? 0 : 2;
+
+		dcp_set_display_device(dcp, false, &handle,
+				       panel_initial_selection_done, cookie);
+	} else
+#endif
+		dcp_push(dcp, false, &dcp_prepare_wake_method,
+			 sizeof(prepare_wake), sizeof(u64),
+			 (void *)prepare_wake, dcp_poweron_after_prepare_wake,
+			 cookie);
 #else
 	if (dcp->main_display) {
 		handle = 0;
@@ -1152,7 +1582,13 @@ void DCP_FW_NAME(iomfb_poweron)(struct apple_dcp *dcp)
 		dev_warn(dcp->dev, "wait for completion error: %d\n", ret);
 	}
 
-	kref_put(&cookie->refcount, release_wait_cookie);;
+	ret = cookie->error;
+	kref_put(&cookie->refcount, release_wait_cookie);
+	if (ret) {
+		drm_connector_set_link_status_property(
+			&dcp->connector->base, DRM_MODE_LINK_STATUS_BAD);
+		return;
+	}
 
 	/* Force a brightness update after poweron, to restore the brightness */
 	dcp->brightness.update = true;
@@ -1180,9 +1616,39 @@ static void dcp_poweroff_after_main_display(struct apple_dcp *dcp, void *out,
 			    cookie);
 }
 
+#ifdef DCP_FW_T8140
+static void dcp_poweroff_after_panel_preflight(struct apple_dcp *dcp, void *out,
+					       void *cookie)
+{
+	dcp_is_main_display(dcp, false, dcp_poweroff_after_main_display,
+			    cookie);
+}
+#endif
+
+#ifdef DCP_FW_T8140
+static void panel_poweroff_status2(struct apple_dcp *dcp, void *out,
+				   void *cookie)
+{
+	dcp_panel_preflight(dcp, dcp_poweroff_after_panel_preflight, cookie);
+}
+static void panel_poweroff_status1(struct apple_dcp *dcp, void *out,
+				   void *cookie)
+{
+	dcp_push(dcp, false, &dcp_panel_a478, 0, 4, NULL,
+		 panel_poweroff_status2, cookie);
+}
+#endif
+
 static void dcp_poweroff_after_prepare_state(struct apple_dcp *dcp, void *out,
 					      void *cookie)
 {
+#ifdef DCP_FW_T8140
+	if (dcp_has_panel(dcp)) {
+		dcp_push(dcp, false, &dcp_panel_a478, 0, 4, NULL,
+			 panel_poweroff_status1, cookie);
+		return;
+	}
+#endif
 	dcp_is_main_display(dcp, false, dcp_poweroff_after_main_display, cookie);
 }
 #endif
@@ -1213,6 +1679,10 @@ static void aborted_swaps_dcp_poff(struct apple_dcp *dcp, void *out, void *cooki
 void DCP_FW_NAME(iomfb_poweroff)(struct apple_dcp *dcp)
 {
 	int ret, swap_id;
+#ifdef DCP_FW_T8140
+	/* Observe the completed swap epoch before submitting the clear frame. */
+	u32 clear_ack_sequence = smp_load_acquire(&dcp->swap_ack_sequence);
+#endif
 #if DCP_FW_VER < DCP_FW_VERSION(26, 6, 0)
 	dcp_abort_swaps_req_t abort_req = dcp_abort_swaps_request(dcp);
 #endif
@@ -1281,6 +1751,33 @@ void DCP_FW_NAME(iomfb_poweroff)(struct apple_dcp *dcp)
 	}
 
 	dev_dbg(dcp->dev, "%s: clear swap submitted: %u\n", __func__, swap_id);
+
+#ifdef DCP_FW_T8140
+	if (dcp_has_panel(dcp)) {
+		/*
+		 * An A408 acknowledgment accepts the clear frame; D590 retires it.
+		 * Native panel poweroff waits until that D590 has itself been ACKed
+		 * before A414/A473. Use the existing acknowledged-swap condition.
+		 */
+		/* Acquire the swap ID published before the completed ACK epoch. */
+		ret = wait_event_timeout(
+			dcp->swap_ack_wait,
+			smp_load_acquire(&dcp->swap_ack_sequence) !=
+					clear_ack_sequence &&
+				READ_ONCE(dcp->swap_acked_id) == swap_id,
+			msecs_to_jiffies(1000));
+		if (!ret) {
+			dev_err(dcp->dev,
+				"private sleep clear completion timed out: swap=%u\n",
+				swap_id);
+			dcp->crashed = true;
+			return;
+		}
+		dev_info(dcp->dev,
+			 "private sleep clear completed and ACKed: swap=%u\n",
+			 swap_id);
+	}
+#endif
 
 	poff_cookie = kzalloc(sizeof(*poff_cookie), GFP_KERNEL);
 	if (!poff_cookie)
@@ -2242,6 +2739,16 @@ static void init_3(struct apple_dcp *dcp, void *out, void *cookie)
 #if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
 static void init_notifications_done(struct apple_dcp *dcp, void *out, void *cookie)
 {
+#ifdef DCP_FW_T8140
+	/*
+	 * Native Neo opens the first panel client in the initial A414/A478
+	 * power-on sequence. Do not open an extra client during registration.
+	 */
+	if (dcp_has_panel(dcp)) {
+		init_3(dcp, out, cookie);
+		return;
+	}
+#endif
 	dcp_first_client_open(dcp, false, init_3, NULL);
 }
 #endif
@@ -2251,7 +2758,11 @@ static void init_2(struct apple_dcp *dcp, void *out, void *cookie)
 #if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
 	static const struct dcp_method_entry call = {
 		.name = "dcpep_update_notify_clients",
+#ifdef DCP_FW_T8140
+		.tag = { 'A', '0', '3', '1' },
+#else
 		.tag = { 'A', '0', '3', '5' },
+#endif
 	};
 	/* Native 26.6 registration, including presentation timing reports. */
 	static const u32 notifications[27] = {
@@ -2260,8 +2771,19 @@ static void init_2(struct apple_dcp *dcp, void *out, void *cookie)
 	};
 
 	static_assert(sizeof(notifications) == 108);
-	if (dcp_has_panel(dcp) && dcp->refresh_intervals.minimum &&
-	    dcp->refresh_intervals.maximum > dcp->refresh_intervals.minimum) {
+	if (dcp_has_panel(dcp) &&
+#ifdef DCP_FW_T8140
+	    true /* Native Neo registers notifications for its fixed panel. */
+#else
+	    dcp->refresh_intervals.minimum &&
+	    dcp->refresh_intervals.maximum > dcp->refresh_intervals.minimum
+#endif
+	) {
+#ifdef DCP_FW_T8140
+		dev_info(
+			dcp->dev,
+			"private Neo A031 display notifications registration\n");
+#endif
 		dcp_push(dcp, false, &call, sizeof(notifications), 0,
 			 (void *)notifications, init_notifications_done, NULL);
 		return;

@@ -11,6 +11,7 @@
 #include <linux/moduleparam.h>
 #include <linux/of_platform.h>
 #include <linux/slab.h>
+#include <linux/unaligned.h>
 #include <linux/workqueue.h>
 #include <linux/soc/apple/rtkit.h>
 
@@ -118,6 +119,8 @@ struct apple_dcp_afkep *afk_init(struct apple_dcp *dcp, u32 endpoint,
 	INIT_LIST_HEAD(&afkep->compact_cmds);
 	spin_lock_init(&afkep->lock);
 	mutex_init(&afkep->compact_tx_lock);
+	mutex_init(&afkep->control_lock);
+	init_completion(&afkep->control_done);
 
 	return afkep;
 
@@ -421,6 +424,61 @@ out_unlock:
 /* Serialize complete messages: fragments carry no transaction offset or tag
  * beyond the repeated interface/length and per-fragment sequence number.
  */
+/* Compact endpoint controls observed around retained panel sleep. */
+enum afk_control {
+	AFK_CONTROL_IDLE = 2,
+	AFK_CONTROL_IDLE_ACK = 3,
+	AFK_CONTROL_RESUME = 4,
+	AFK_CONTROL_RESUME_ACK = 5,
+};
+
+int afk_set_idle(struct apple_dcp_afkep *ep, bool idle)
+{
+	__le32 request =
+		cpu_to_le32(idle ? AFK_CONTROL_IDLE : AFK_CONTROL_RESUME);
+	u32 expected = idle ? AFK_CONTROL_IDLE_ACK : AFK_CONTROL_RESUME_ACK;
+	unsigned long flags;
+	int ret;
+
+	if (!ep ||
+	    (!ep->compact && ep->dcp->fw_compat != DCP_FIRMWARE_V_26_6_T8140))
+		return -EOPNOTSUPP;
+	/* An endpoint with no services has not set compact from an announcement. */
+	if (!ep->txbfr.ready || !ep->rxbfr.ready)
+		return -ENOTCONN;
+	mutex_lock(&ep->control_lock);
+	reinit_completion(&ep->control_done);
+	spin_lock_irqsave(&ep->lock, flags);
+	ep->control_pending = true;
+	spin_unlock_irqrestore(&ep->lock, flags);
+	/*
+	 * Keep the control out of any fragmented service message, but allow
+	 * service replies to be sent while waiting for the control ACK.
+	 */
+	mutex_lock(&ep->compact_tx_lock);
+	ret = afk_send_compact_fragment(ep, 0, &request, sizeof(request),
+					sizeof(request));
+	mutex_unlock(&ep->compact_tx_lock);
+	if (!ret && !wait_for_completion_timeout(&ep->control_done,
+						 msecs_to_jiffies(1000)))
+		ret = -ETIMEDOUT;
+	spin_lock_irqsave(&ep->lock, flags);
+	/* Native AV-family idle ACKs retain opaque upper bytes. */
+	if (!ret && (ep->control_reply & 0xff) != expected)
+		ret = -EIO;
+	ep->control_pending = false;
+	spin_unlock_irqrestore(&ep->lock, flags);
+	dev_info(ep->dcp->dev,
+		 "AFK[ep:%02x]: %s control reply %#x, status %d\n",
+		 ep->endpoint, idle ? "idle" : "resume", ep->control_reply,
+		 ret);
+	if (ret)
+		dev_err(ep->dcp->dev, "AFK[ep:%02x]: %s control failed: %d\n",
+			ep->endpoint, idle ? "idle" : "resume", ret);
+	mutex_unlock(&ep->control_lock);
+	return ret;
+}
+
 static int afk_send_compact(struct apple_dcp_afkep *ep, u16 intf_id, u8 type,
 			    u8 category, const void *payload, size_t payload_size,
 			    size_t wire_size)
@@ -921,6 +979,19 @@ static bool afk_recv_handle_compact(struct apple_dcp_afkep *ep, u32 channel,
 		return false;
 	total = le32_to_cpu(hdr->length);
 	intf_id = le16_to_cpu(hdr->intf_id);
+	if (!offset && !intf_id && total == sizeof(u32) &&
+	    data_size == header_size + sizeof(u32)) {
+		unsigned long flags;
+		u32 reply = get_unaligned_le32(data + header_size);
+
+		spin_lock_irqsave(&ep->lock, flags);
+		if (ep->control_pending) {
+			ep->control_reply = reply;
+			complete(&ep->control_done);
+		}
+		spin_unlock_irqrestore(&ep->lock, flags);
+		return true;
+	}
 	/* Eight-byte empty control messages also occur in native AV traces. */
 	if (!offset && total == 8 && data_size == header_size + 8)
 		return true;

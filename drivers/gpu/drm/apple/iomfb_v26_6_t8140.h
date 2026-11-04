@@ -9,6 +9,7 @@
 /* T8140 omits the auxiliary surface array from the A408 argument list. */
 #define DCP_FW_T8140 1
 #include "iomfb_template.h"
+int iomfb_panel_prepare_idle_v26_6_t8140(struct apple_dcp *dcp);
 #undef DCP_FW_T8140
 #undef DCP_FW_VER
 #undef DCP_FW

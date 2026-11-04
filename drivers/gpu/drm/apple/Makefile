@@ -20,3 +20,6 @@ appledrm-y += plane.o
 appledrm-$(CONFIG_TRACING) += trace.o
 
 obj-$(CONFIG_DRM_APPLE) += appledrm.o
+
+# Retained DCP firmware and protected display-host support.
+appledrm-y += neo_display_host.o neo_display_power.o

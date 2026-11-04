@@ -46,6 +46,20 @@ static void system_init(struct apple_epic_service *service, const char *name,
 {
 	struct systemep_work *work;
 
+	/*
+	 * Native Neo keeps the root system interface announced but unstarted.
+	 * Powerlog is a distinct service and retains its normal activation.
+	 * This private comparison leaves explicit verbose logging unchanged.
+	 */
+	if (!enable_verbose_logging && service->ep->compact &&
+	    service->ep->dcp->fw_compat == DCP_FIRMWARE_V_26_6_T8140 &&
+	    dcp_has_panel(service->ep->dcp)) {
+		service->defer_start = true;
+		dev_info(
+			service->ep->dcp->dev,
+			"private native match: root system service remains unstarted\n");
+	}
+
 	if (!enable_verbose_logging)
 		return;
 

@@ -284,6 +284,12 @@ struct apple_dcp {
 	struct dcp_panel panel;
 
 	struct apple_dcp_afkep *systemep;
+	struct apple_dcp_afkep *diag_aux_eps[IOMFB_ENDPOINT - SYSTEM_ENDPOINT];
+	bool diag_idle_done;
+	bool diag_idle_complete;
+	bool diag_unused_host_quiesced;
+	bool diag_unused_host_awake;
+	bool panel_client_opened;
 	struct completion systemep_done;
 
 	struct apple_dcp_afkep *ibootep;
@@ -307,6 +313,12 @@ struct apple_dcp {
 	struct apple_epic_service *dpavctrl_av_controller[2];
 	struct apple_epic_service *dpavctrl_late_service;
 	struct apple_dcp_afkep *dcpavservep;
+	struct apple_epic_service *panel_sac_service;
+	struct completion panel_sac_ready;
+	struct completion panel_sac_callbacks_done;
+	unsigned int panel_sac_callbacks;
+	/* Private bounded record of advertised SAC profiles, not calibration data. */
+
 	struct dcpavserv dcpavserv;
 
 	struct apple_dcp_afkep *avep;
@@ -358,3 +370,5 @@ static inline bool dcp_fw_is_26_6(const struct apple_dcp *dcp)
 }
 
 #endif /* __APPLE_DCP_INTERNAL_H__ */
+
+int neo_diag_display_transport_init(struct apple_dcp *dcp);

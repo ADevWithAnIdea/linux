@@ -29,6 +29,10 @@ struct apple_encoder {
 
 #define to_apple_encoder(x) container_of(x, struct apple_encoder, base)
 
+int neo_diag_quiesce_unused_host(struct apple_dcp *dcp);
+int neo_diag_resume_unused_host(struct apple_dcp *dcp);
+int neo_diag_pmgr_order_init(struct apple_dcp *dcp);
+int neo_diag_pmgr_order_status(struct apple_dcp *dcp);
 void dcp_poweroff(struct platform_device *pdev);
 void dcp_poweron(struct platform_device *pdev);
 int dcp_set_crc(struct drm_crtc *crtc, bool enabled);
@@ -84,3 +88,6 @@ void __init dcp_audio_register(void);
 void __exit dcp_audio_unregister(void);
 
 #endif
+
+int neo_diag_cpu_clock_guard(struct apple_dcp *dcp, bool enable);
+int neo_diag_scanout_clock_guard(struct apple_dcp *dcp, bool enable);
