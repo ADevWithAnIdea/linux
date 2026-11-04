@@ -84,6 +84,7 @@
 struct apple_mbox_hw {
 	unsigned int control_full;
 	unsigned int control_empty;
+	unsigned int control_enable;
 
 	unsigned int a2i_control;
 	unsigned int a2i_send0;
@@ -299,6 +300,26 @@ void apple_mbox_stop(struct apple_mbox *mbox)
 }
 EXPORT_SYMBOL(apple_mbox_stop);
 
+/*
+ * Called only after the client has quiesced the IOP. Disabling the IRQ
+ * alone leaves this FIFO enabled and prevents retained CPU stop on ASC v4.
+ */
+int apple_mbox_disable_recv_fifo(struct apple_mbox *mbox)
+{
+	u32 control;
+
+	if (mbox->active)
+		return -EBUSY;
+	if (!mbox->hw->control_enable)
+		return -EOPNOTSUPP;
+	control = readl(mbox->regs + mbox->hw->i2a_control);
+	writel(control & ~mbox->hw->control_enable,
+	       mbox->regs + mbox->hw->i2a_control);
+	readl(mbox->regs + mbox->hw->i2a_control);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(apple_mbox_disable_recv_fifo);
+
 struct apple_mbox *apple_mbox_get(struct device *dev, int index)
 {
 	struct of_phandle_args args;
@@ -424,6 +445,7 @@ static const struct apple_mbox_hw apple_mbox_t8015_hw = {
 };
 
 static const struct apple_mbox_hw apple_mbox_asc_hw = {
+	.control_enable = APPLE_ASC_MBOX_CONTROL_ENABLE,
 	.control_full = APPLE_ASC_MBOX_CONTROL_FULL,
 	.control_empty = APPLE_ASC_MBOX_CONTROL_EMPTY,
 
@@ -465,10 +487,14 @@ static const struct apple_mbox_hw apple_mbox_neo_proxy_hw = {
     .has_irq_controls = false,
 };
 static const struct of_device_id apple_mbox_of_match[] = {
-    { .compatible = "apple,neo-aop-proxy-mailbox", .data = &apple_mbox_neo_proxy_hw },
+	{ .compatible = "apple,t8140-asc-proxy-mailbox",
+	  .data = &apple_mbox_neo_proxy_hw },
+	{ .compatible = "apple,neo-aop-proxy-mailbox",
+	  .data = &apple_mbox_neo_proxy_hw },
 
 	{ .compatible = "apple,asc-mailbox-v4", .data = &apple_mbox_asc_hw },
-	{ .compatible = "apple,t8015-asc-mailbox", .data = &apple_mbox_t8015_hw },
+	{ .compatible = "apple,t8015-asc-mailbox",
+	  .data = &apple_mbox_t8015_hw },
 	{ .compatible = "apple,m3-mailbox-v2", .data = &apple_mbox_m3_hw },
 	{}
 };
