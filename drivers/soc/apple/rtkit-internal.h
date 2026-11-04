@@ -28,6 +28,7 @@ struct apple_rtkit {
 	/* Compatibility for clients configuring boot policy per instance. */
 	unsigned int compat_quirks;
 	bool skip_boot_ap_power;
+	bool retained_resume;
 	struct device *dev;
 
 	struct apple_mbox *mbox;
@@ -35,6 +36,7 @@ struct apple_rtkit {
 	struct completion epmap_completion;
 	struct completion iop_pwr_ack_completion;
 	struct completion ap_pwr_ack_completion;
+	struct completion idle_notification_completion;
 
 	int boot_result;
 	int version;

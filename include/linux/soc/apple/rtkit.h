@@ -44,9 +44,11 @@ struct apple_rtkit_shmem {
  *
  * Clients select these at initialization. Zero preserves the default protocol.
  */
+/* OSLOG_ACK: Echo cursor notifications before entering AP idle. */
 enum apple_rtkit_quirks {
 	APPLE_RTKIT_QUIRK_EARLY_CRASHLOG = 1U << 0,
 	APPLE_RTKIT_QUIRK_OSLOG_NO_SIZE = 1U << 1,
+	APPLE_RTKIT_QUIRK_OSLOG_ACK = 1U << 2,
 };
 
 /*
@@ -171,6 +173,33 @@ int apple_rtkit_poweroff(struct apple_rtkit *rtk);
  * Put the co-processor into idle mode
  */
 int apple_rtkit_idle(struct apple_rtkit *rtk);
+/**
+ * apple_rtkit_idle_with_peer() - idle a shared IOP after its other AP link
+ * @rtk: RTKit instance
+ * @idle_peer: callback after this AP is idle and before the IOP is idled
+ * @cookie: callback data
+ *
+ * Return: zero on success or a negative error.
+ */
+int apple_rtkit_idle_with_peer(struct apple_rtkit *rtk,
+			       int (*idle_peer)(void *cookie), void *cookie);
+/**
+ * apple_rtkit_suspend_retained() - finish idle and stop the receive FIFO
+ * @rtk: instance whose AP and IOP have acknowledged retained idle
+ *
+ * The client may gate the CPU only after this returns successfully.
+ * Return: zero on success or a negative error.
+ */
+int apple_rtkit_suspend_retained(struct apple_rtkit *rtk);
+/**
+ * apple_rtkit_prepare_retained_resume() - prepare an existing RTKit session
+ * @rtk: idle instance with a stopped coprocessor CPU
+ *
+ * Retains all endpoint buffers. The client restarts its CPU afterwards and
+ * calls apple_rtkit_boot() to complete the retained handshake.
+ * Return: zero on success or a negative error.
+ */
+int apple_rtkit_prepare_retained_resume(struct apple_rtkit *rtk);
 
 /*
  * Checks if RTKit is running and ready to handle messages.

@@ -38,6 +38,7 @@ enum {
 	APPLE_RTKIT_MGMT_EPMAP_REPLY = 8,
 	APPLE_RTKIT_MGMT_SET_AP_PWR_STATE = 0xb,
 	APPLE_RTKIT_MGMT_SET_AP_PWR_STATE_ACK = 0xb,
+	APPLE_RTKIT_MGMT_IDLE_NOTIFICATION = 0xc,
 };
 
 #define APPLE_RTKIT_MGMT_HELLO_MINVER GENMASK_ULL(15, 0)
@@ -72,6 +73,7 @@ enum {
 
 #define APPLE_RTKIT_OSLOG_TYPE GENMASK_ULL(63, 56)
 #define APPLE_RTKIT_OSLOG_BUFFER_REQUEST 1
+#define APPLE_RTKIT_OSLOG_NOTIFY 2
 #define APPLE_RTKIT_OSLOG_SIZE GENMASK_ULL(55, 36)
 #define APPLE_RTKIT_OSLOG_IOVA GENMASK_ULL(35, 0)
 
@@ -176,12 +178,23 @@ static void apple_rtkit_management_rx_epmap(struct apple_rtkit *rtk, u64 msg)
 		ep = 32 * base + i;
 		dev_dbg(rtk->dev, "RTKit: Discovered endpoint 0x%02x\n", ep);
 		set_bit(ep, rtk->endpoints);
-		if (apple_rtkit_has_quirk(rtk, APPLE_RTKIT_QUIRK_EARLY_CRASHLOG) &&
+		if (!rtk->retained_resume &&
+		    apple_rtkit_has_quirk(rtk,
+					  APPLE_RTKIT_QUIRK_EARLY_CRASHLOG) &&
 		    ep == APPLE_RTKIT_EP_CRASHLOG)
 			apple_rtkit_start_ep(rtk, ep);
 	}
 
 	reply = FIELD_PREP(APPLE_RTKIT_MGMT_EPMAP_BASE, base);
+	if (rtk->retained_resume) {
+		/*
+		 * The retained handshake acknowledges the published endpoint map.
+		 * Existing buffers and application transports remain owned.
+		 */
+		reply |= FIELD_PREP(APPLE_RTKIT_MGMT_EPMAP_BITMAP, bitmap);
+		if (!base && rtk->crashlog_buffer.size)
+			reply |= BIT_ULL(APPLE_RTKIT_EP_CRASHLOG);
+	}
 	if (msg & APPLE_RTKIT_MGMT_EPMAP_LAST)
 		reply |= APPLE_RTKIT_MGMT_EPMAP_LAST;
 	else
@@ -191,6 +204,12 @@ static void apple_rtkit_management_rx_epmap(struct apple_rtkit *rtk, u64 msg)
 
 	if (!(msg & APPLE_RTKIT_MGMT_EPMAP_LAST))
 		return;
+
+	if (rtk->retained_resume) {
+		rtk->boot_result = 0;
+		complete_all(&rtk->epmap_completion);
+		return;
+	}
 
 	for_each_set_bit(ep, rtk->endpoints, APPLE_RTKIT_APP_ENDPOINT_START) {
 		if (apple_rtkit_has_quirk(rtk, APPLE_RTKIT_QUIRK_EARLY_CRASHLOG) &&
@@ -264,6 +283,11 @@ static void apple_rtkit_management_rx(struct apple_rtkit *rtk, u64 msg)
 		break;
 	case APPLE_RTKIT_MGMT_SET_AP_PWR_STATE_ACK:
 		apple_rtkit_management_rx_ap_pwr_ack(rtk, msg);
+		break;
+	case APPLE_RTKIT_MGMT_IDLE_NOTIFICATION:
+		dev_info(rtk->dev,
+			 "RTKit: retained idle notification received\n");
+		complete_all(&rtk->idle_notification_completion);
 		break;
 	default:
 		dev_warn(
@@ -568,6 +592,23 @@ static void apple_rtkit_oslog_rx(struct apple_rtkit *rtk, u64 msg)
 		apple_rtkit_common_rx_get_buffer(rtk, &rtk->oslog_buffer,
 						 APPLE_RTKIT_EP_OSLOG, msg);
 		break;
+	case APPLE_RTKIT_OSLOG_NOTIFY:
+		if (!apple_rtkit_has_quirk(rtk, APPLE_RTKIT_QUIRK_OSLOG_ACK)) {
+			dev_warn(rtk->dev,
+				 "RTKit: Unknown oslog message: %llx\n", msg);
+			break;
+		}
+		/*
+		 * Native runtime capture echoes the exact cursor notification.
+		 * Leaving one pending prevents the next AP-IDLE acknowledgment.
+		 * No firmware memory is dereferenced or exposed here.
+		 */
+		dev_info(rtk->dev,
+			 "RTKit: acknowledging OSLog notification %#llx\n",
+			 msg);
+		apple_rtkit_send_message(rtk, APPLE_RTKIT_EP_OSLOG, msg, NULL,
+					 false);
+		break;
 	default:
 		dev_warn(rtk->dev, "RTKit: Unknown oslog message: %llx\n",
 			 msg);
@@ -737,6 +778,7 @@ struct apple_rtkit *apple_rtkit_init(struct device *dev, void *cookie,
 	init_completion(&rtk->epmap_completion);
 	init_completion(&rtk->iop_pwr_ack_completion);
 	init_completion(&rtk->ap_pwr_ack_completion);
+	init_completion(&rtk->idle_notification_completion);
 
 	bitmap_zero(rtk->endpoints, APPLE_RTKIT_MAX_ENDPOINTS);
 	set_bit(APPLE_RTKIT_EP_MGMT, rtk->endpoints);
@@ -789,6 +831,47 @@ static int apple_rtkit_wait_for_completion(struct completion *c)
 		return 0;
 }
 
+/* Silence mailbox IRQs before the client gates its retained CPU domain. */
+int apple_rtkit_suspend_retained(struct apple_rtkit *rtk)
+{
+	int ret;
+
+	if (rtk->crashed ||
+	    rtk->iop_power_state != APPLE_RTKIT_PWR_STATE_IDLE ||
+	    rtk->ap_power_state != APPLE_RTKIT_PWR_STATE_IDLE)
+		return -EINVAL;
+	ret = apple_rtkit_wait_for_completion(
+		&rtk->idle_notification_completion);
+	if (ret)
+		return ret;
+	apple_mbox_stop(rtk->mbox);
+	flush_workqueue(rtk->wq);
+	return apple_mbox_disable_recv_fifo(rtk->mbox);
+}
+EXPORT_SYMBOL_GPL(apple_rtkit_suspend_retained);
+
+/*
+ * Prepare before the client restarts its retained coprocessor CPU. This
+ * deliberately preserves shared buffers, endpoint discovery and crash state.
+ * The caller must have completed IDLE and keep the CPU stopped until return.
+ */
+int apple_rtkit_prepare_retained_resume(struct apple_rtkit *rtk)
+{
+	if (rtk->crashed ||
+	    rtk->iop_power_state != APPLE_RTKIT_PWR_STATE_IDLE ||
+	    rtk->ap_power_state != APPLE_RTKIT_PWR_STATE_IDLE)
+		return -EINVAL;
+	apple_mbox_stop(rtk->mbox);
+	flush_workqueue(rtk->wq);
+	reinit_completion(&rtk->epmap_completion);
+	reinit_completion(&rtk->iop_pwr_ack_completion);
+	reinit_completion(&rtk->ap_pwr_ack_completion);
+	rtk->boot_result = -EINPROGRESS;
+	rtk->retained_resume = true;
+	return apple_mbox_start(rtk->mbox);
+}
+EXPORT_SYMBOL_GPL(apple_rtkit_prepare_retained_resume);
+
 int apple_rtkit_reinit(struct apple_rtkit *rtk)
 {
 	/* make sure we don't handle any messages while reinitializing */
@@ -816,6 +899,7 @@ int apple_rtkit_reinit(struct apple_rtkit *rtk)
 	reinit_completion(&rtk->ap_pwr_ack_completion);
 
 	rtk->crashed = false;
+	rtk->retained_resume = false;
 	rtk->iop_power_state = APPLE_RTKIT_PWR_STATE_OFF;
 	rtk->ap_power_state = APPLE_RTKIT_PWR_STATE_OFF;
 
@@ -1013,6 +1097,7 @@ int apple_rtkit_boot(struct apple_rtkit *rtk)
 
 	if (rtk->skip_boot_ap_power) {
 		rtk->ap_power_state = APPLE_RTKIT_PWR_STATE_ON;
+		rtk->retained_resume = false;
 		return 0;
 	}
 
@@ -1021,6 +1106,8 @@ int apple_rtkit_boot(struct apple_rtkit *rtk)
 		dev_err(rtk->dev,
 			"RTKit: failed waiting for AP power ACK (state %#x): %d\n",
 			rtk->ap_power_state, ret);
+	else
+		rtk->retained_resume = false;
 	return ret;
 }
 EXPORT_SYMBOL_GPL(apple_rtkit_boot);
@@ -1059,23 +1146,36 @@ int apple_rtkit_poweroff(struct apple_rtkit *rtk)
 }
 EXPORT_SYMBOL_GPL(apple_rtkit_poweroff);
 
-int apple_rtkit_idle(struct apple_rtkit *rtk)
+/*
+ * A multi-host client must idle its remaining AP link after this AP link
+ * has acknowledged IDLE, but before the shared IOP is told to idle.
+ */
+int apple_rtkit_idle_with_peer(struct apple_rtkit *rtk,
+			       int (*idle_peer)(void *), void *cookie)
 {
 	int ret;
-
-	/* if OFF is used here the co-processor will not wake up again */
-	ret = apple_rtkit_set_ap_power_state(rtk,
-					     APPLE_RTKIT_PWR_STATE_IDLE);
-	if (ret)
+	reinit_completion(&rtk->idle_notification_completion);
+	ret = apple_rtkit_set_ap_power_state(rtk, APPLE_RTKIT_PWR_STATE_IDLE);
+	if (ret) {
+		dev_err(rtk->dev, "RTKit: main AP idle failed: %d\n", ret);
 		return ret;
-
+	}
+	if (idle_peer) {
+		ret = idle_peer(cookie);
+		if (ret)
+			return ret;
+	}
 	ret = apple_rtkit_set_iop_power_state(rtk, APPLE_RTKIT_PWR_STATE_IDLE);
-	if (ret)
+	if (ret) {
+		dev_err(rtk->dev, "RTKit: IOP idle failed: %d\n", ret);
 		return ret;
-
-	rtk->iop_power_state = APPLE_RTKIT_PWR_STATE_IDLE;
-	rtk->ap_power_state = APPLE_RTKIT_PWR_STATE_IDLE;
+	}
 	return 0;
+}
+EXPORT_SYMBOL_GPL(apple_rtkit_idle_with_peer);
+int apple_rtkit_idle(struct apple_rtkit *rtk)
+{
+	return apple_rtkit_idle_with_peer(rtk, NULL, NULL);
 }
 EXPORT_SYMBOL_GPL(apple_rtkit_idle);
 
