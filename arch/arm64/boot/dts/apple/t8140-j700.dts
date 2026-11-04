@@ -254,3 +254,22 @@
 &mtp_mbox {
 	apple,reset-recv-fifo-on-start;
 };
+
+/* The DCP driver now completes both host links before gating its CPUs. */
+&ps_disp_cpu {
+	/delete-property/ apple,always-on;
+	apple,no-auto-enable;
+};
+
+&ps_dispext0_cpu {
+	/delete-property/ apple,always-on;
+};
+
+&pmp_report_disp {
+	/delete-property/ apple,always-on;
+	apple,boot-on;
+};
+
+&pmp_report_dispext {
+	apple,boot-on;
+};
