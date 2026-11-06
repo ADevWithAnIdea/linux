@@ -629,6 +629,7 @@ static inline unsigned int rdo_max_power(u32 rdo)
 #define   EUDO_CABLE_SPEED_USB3_GEN1	1
 #define   EUDO_CABLE_SPEED_USB4_GEN2	2
 #define   EUDO_CABLE_SPEED_USB4_GEN3	3
+#define   EUDO_CABLE_SPEED_USB4_GEN4	4
 #define EUDO_CABLE_TYPE_MASK		GENMASK(20, 19)
 #define EUDO_CABLE_TYPE_SHIFT		19
 #define   EUDO_CABLE_TYPE_PASSIVE	0
