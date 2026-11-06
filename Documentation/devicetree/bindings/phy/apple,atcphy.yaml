@@ -28,6 +28,96 @@ description: >
 
 allOf:
   - $ref: /schemas/usb/usb-switch.yaml#
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: apple,t6040-atcphy
+    then:
+      properties:
+        reg:
+          minItems: 4
+          items:
+            - description: Analog PHY core
+            - description: PHY power and APB reset controls
+            - description: PHY fabric clock controls
+            - description: Common PHY controls
+            - description: CIO4 PHY firmware processor controls
+            - description: CIO4 PHY firmware data SRAM
+            - description: USB2 PHY registers
+            - description: USB PIPE handler registers
+            - description: USB bus clock controls
+        reg-names:
+          minItems: 4
+          items:
+            - const: core
+            - const: power
+            - const: fabric
+            - const: common
+            - const: coproc
+            - const: sram
+            - const: usb2phy
+            - const: pipehandler
+            - const: pipe-clocks
+        power-domains:
+          minItems: 4
+          items:
+            - description: USB always-on supply
+            - description: Common PHY supply with PMP voltage vote
+            - description: PHY processor and register wrapper
+            - description: DisplayPort common supply
+            - description: USB controller supply
+      required:
+        - power-domains
+      allOf:
+        - if:
+            required: ["#reset-cells"]
+          then:
+            properties:
+              reg:
+                minItems: 9
+              reg-names:
+                minItems: 9
+              power-domains:
+                minItems: 5
+        - if:
+            required: ["apple,fixed-dp"]
+          then:
+            properties:
+              reg:
+                maxItems: 4
+              reg-names:
+                maxItems: 4
+              orientation-switch: false
+              mboxes: false
+          else:
+            properties:
+              reg:
+                minItems: 6
+              reg-names:
+                minItems: 6
+            required:
+              - orientation-switch
+              - mboxes
+    else:
+      properties:
+        reg:
+          minItems: 5
+          maxItems: 5
+        reg-names:
+          items:
+            - const: core
+            - const: lpdptx
+            - const: axi2af
+            - const: usb2phy
+            - const: pipehandler
+        power-domains:
+          maxItems: 1
+      required:
+        - ports
+        - "#reset-cells"
+        - orientation-switch
+        - power-domains
 
 $defs:
   apple,tunable:
@@ -46,6 +136,22 @@ $defs:
       register region.
 
 properties:
+  apple,tunable-usb2-default:
+    $ref: "#/$defs/apple,tunable"
+    description: Default board tuning relative to the USB2 PHY region.
+
+  apple,tunable-usb2-host:
+    $ref: "#/$defs/apple,tunable"
+    description: Host board tuning relative to the USB2 PHY region.
+
+  apple,tunable-usb2-device:
+    $ref: "#/$defs/apple,tunable"
+    description: Device board tuning relative to the USB2 PHY region.
+
+  apple,tunable-pipehandler:
+    $ref: "#/$defs/apple,tunable"
+    description: Board tuning relative to the PIPE handler region.
+
   compatible:
     oneOf:
       - items:
@@ -55,22 +161,24 @@ properties:
               - apple,t8112-atcphy
           - const: apple,t8103-atcphy
       - const: apple,t8103-atcphy
+      - const: apple,t6040-atcphy
 
   reg:
+    minItems: 1
     items:
       - description: Common controls for all PHYs (USB2/3/4, DisplayPort, TBT)
       - description: DisplayPort Alternate Mode PHY specific controls
       - description: Type-C PHY AXI to Apple Fabric interconnect controls
       - description: USB2 PHY specific controls
-      - description: USB3 PIPE interface controls
+      - description: USB3 PIPE interface controls or CIO4 processor controls
+      - description: CIO4 firmware data SRAM
+      - description: CIO4 USB2 PHY registers
+      - description: CIO4 USB PIPE handler registers
+      - description: CIO4 USB bus clock controls
 
   reg-names:
-    items:
-      - const: core
-      - const: lpdptx
-      - const: axi2af
-      - const: usb2phy
-      - const: pipehandler
+    minItems: 1
+    maxItems: 9
 
   "#phy-cells":
     const: 1
@@ -81,8 +189,36 @@ properties:
   mode-switch: true
   orientation-switch: true
 
+  apple,fixed-dp:
+    type: boolean
+    description: >
+      The PHY lanes are permanently wired as a four-lane DisplayPort link
+      to an onboard HDMI converter, without USB or connector orientation
+      switching. T6040 exposes separate power, fabric and common controls.
+
   power-domains:
+    minItems: 1
+    maxItems: 5
+
+  mboxes:
     maxItems: 1
+    description: RTKit mailbox for the CIO4 PHY processor.
+
+  port:
+    $ref: /schemas/graph.yaml#/properties/port
+    description: Connection to the Type-C connector on a CIO4 USB4-only port.
+
+  apple,tunable-cio4-fabric:
+    $ref: "#/$defs/apple,tunable"
+    description: CIO4 fabric calibration, applied to the fabric region.
+
+  apple,tunable-cio4-common:
+    $ref: "#/$defs/apple,tunable"
+    description: CIO4 common calibration, applied to the common region.
+
+  apple,tunable-cio4-analog:
+    $ref: "#/$defs/apple,tunable"
+    description: CIO4 board calibration, applied to the analog core region.
 
   ports:
     $ref: /schemas/graph.yaml#/properties/ports
@@ -156,11 +292,11 @@ required:
   - reg
   - reg-names
   - "#phy-cells"
-  - "#reset-cells"
-  - orientation-switch
   - mode-switch
-  - power-domains
-  - ports
+
+anyOf:
+  - required: [ports]
+  - required: [port]
 
 additionalProperties: false
 
