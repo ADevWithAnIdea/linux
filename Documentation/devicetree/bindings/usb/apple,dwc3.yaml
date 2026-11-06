@@ -16,6 +16,15 @@ description:
 allOf:
   - $ref: snps,dwc3-common.yaml#
 
+$defs:
+  apple,tunable:
+    $ref: /schemas/types.yaml#/definitions/uint32-matrix
+    items:
+      items:
+        - description: Register offset
+        - description: Bits cleared in the register
+        - description: Bits set in the register
+
 properties:
   compatible:
     oneOf:
@@ -23,22 +32,54 @@ properties:
           - enum:
               - apple,t6000-dwc3
               - apple,t6020-dwc3
+              - apple,t6040-dwc3
               - apple,t8112-dwc3
+              - apple,t8132-dwc3
           - const: apple,t8103-dwc3
       - const: apple,t8103-dwc3
 
   reg:
+    minItems: 2
     items:
       - description: Core DWC3 region
       - description: Apple-specific DWC3 region
+      - description: Apple DWC3 configuration region
+      - description: USB link controls
+      - description: USB bulk fabric controls
 
   reg-names:
+    minItems: 2
     items:
       - const: dwc3-core
       - const: dwc3-apple
+      - const: dwc3-cfg
+      - const: link
+      - const: bulk
+
+  apple,tunable-host:
+    $ref: "#/$defs/apple,tunable"
+    description: Board tuning relative to DWC3 globals (core plus 0xc100).
+
+  apple,tunable-cfg-host:
+    $ref: "#/$defs/apple,tunable"
+    description: Board tuning relative to the Apple configuration region.
+
+  apple,tunable-link-host:
+    $ref: "#/$defs/apple,tunable"
+    description: Host board tuning relative to the USB link region.
+
+  apple,tunable-bulk:
+    $ref: "#/$defs/apple,tunable"
+    description: Board tuning relative to the USB bulk fabric region.
 
   interrupts:
-    maxItems: 1
+    minItems: 1
+    maxItems: 2
+
+  interrupt-names:
+    items:
+      - const: host
+      - const: peripheral
 
   iommus:
     maxItems: 2
