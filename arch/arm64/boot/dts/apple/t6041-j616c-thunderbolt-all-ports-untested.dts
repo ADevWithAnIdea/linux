@@ -1,0 +1,342 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * EXPERIMENTAL -- TOTALLY UNTESTED all-port Thunderbolt configuration.
+ *
+ * This complete DTB has NEVER been booted or hardware-validated. It enables
+ * all three J616c USB-C ports, including the two ports not qualified by the
+ * current Thunderbolt5 orientation/hotplug test. Controller1 resources are
+ * transcribed from the captured J616c ADT; this is not runtime evidence.
+ *
+ * All ports are owned by Linux in this tree. No USB proxy/debug port is
+ * reserved. PCIe and USB tunneling are NOT validated by this description.
+ * Use t6041-j616c-usb4-validation.dtb for the tested right-port-only setup.
+ * This opt-in file belongs ONLY to experimental-20261105-neo-max-bringup.
+ */
+#include "t6041-j616c.dts"
+#include "t6041-usb4-right.dtsi"
+
+/* Left-front Type-C controller shares NUB SPMI A0 with the left-rear port. */
+&nub_spmi_a0 {
+	hpm1: usb-pd@a {
+		compatible = "apple,sn201202x";
+		reg = <0xa SPMI_USID>;
+		/* ADT: IRQ37, sleep43, wake45; select uses the same bank layout. */
+		interrupts = <37 IRQ_TYPE_EDGE_RISING>,
+			     <39 IRQ_TYPE_EDGE_RISING>,
+			     <43 IRQ_TYPE_EDGE_RISING>,
+			     <45 IRQ_TYPE_EDGE_RISING>;
+		interrupt-names = "irq", "select", "sleep", "wake";
+		status = "okay";
+
+		typec1: connector {
+			label = "USB-C Left-front (TOTALLY UNTESTED)";
+			compatible = "usb-c-connector";
+			power-role = "dual";
+			data-role = "dual";
+			try-power-role = "sink";
+		};
+	};
+};
+
+&pmgr1 {
+	ps_atc1_common: power-controller@3b8 {
+		compatible = "apple,t6041-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x3b8 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "atc1_common";
+		power-domains = <&ps_fab2_soc>;
+	};
+};
+
+&pmp_report {
+	pmp_report_atc1: report@1f {
+		compatible = "apple,t6000-pmp-v2-report-entry";
+		reg = <31>;
+		label = "pmp-atc1-common";
+		/* The attached cable can leave PHYMXWRAP active in iBoot. */
+		apple,boot-on;
+		#power-domain-cells = <0>;
+		power-domains = <&ps_atc1_common>;
+	};
+};
+
+&pmgr3 {
+	ps_atc1_usb_aon: power-controller@d0 {
+		compatible = "apple,t6041-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0xd0 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "atc1_usb_aon";
+	};
+	ps_atc1_phymxwrap: power-controller@158 {
+		compatible = "apple,t6041-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x158 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "atc1_phymxwrap";
+		power-domains = <&pmp_report_atc1>, <&ps_atc1_usb_aon>;
+	};
+	ps_atc1_common_dp: power-controller@a8 {
+		compatible = "apple,t6041-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0xa8 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "atc1_common_dp";
+	};
+};
+
+&{/aliases} {
+	atcphy1 = &atcphy1;
+};
+
+&{/soc} {
+	acio_phy1_mbox: mailbox@38b148000 {
+		compatible = "apple,t6041-asc-mailbox", "apple,asc-mailbox-v4";
+		reg = <3 0x8b148000 0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 948 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 949 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 950 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 951 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "send-empty", "send-not-empty",
+				  "recv-empty", "recv-not-empty";
+		#mbox-cells = <0>;
+	};
+
+	atcphy1: phy@38b000000 {
+		compatible = "apple,t6040-atcphy";
+		reg = <3 0x8b000000 0 0x30000>,
+		      <3 0x8b200000 0 0x4000>,
+		      <3 0x8b244000 0 0x4000>,
+		      <3 0x8b250000 0 0x4000>,
+		      <3 0x8b140000 0 0x4000>,
+		      <3 0x8b0c0000 0 0x10000>;
+		reg-names = "core", "power", "fabric", "common", "coproc", "sram";
+		#phy-cells = <1>;
+		mode-switch;
+		orientation-switch;
+		mboxes = <&acio_phy1_mbox>;
+		power-domains = <&ps_atc1_usb_aon>, <&pmp_report_atc1>,
+				<&ps_atc1_phymxwrap>, <&ps_atc1_common_dp>;
+		port {
+			atcphy1_typec_lanes: endpoint {
+				remote-endpoint = <&typec1_connector_ss>;
+			};
+		};
+	};
+};
+
+&typec1 {
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		port@1 {
+			reg = <1>;
+			typec1_connector_ss: endpoint {
+				remote-endpoint = <&atcphy1_typec_lanes>;
+			};
+		};
+	};
+};
+
+&pmgr1 {
+	ps_atc1_cio: power-controller@3c0 {
+		compatible = "apple,t6041-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x3c0 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "atc1_cio";
+		power-domains = <&pmp_report_atc1>;
+	};
+	ps_atc1_pcie: power-controller@3c8 {
+		compatible = "apple,t6041-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x3c8 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "atc1_pcie";
+		power-domains = <&pmp_report_atc1>;
+	};
+	ps_atc1_cio_pcie: power-controller@3d0 {
+		compatible = "apple,t6041-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x3d0 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "atc1_cio_pcie";
+		power-domains = <&ps_atc1_cio>;
+	};
+	ps_atc1_cio_usb: power-controller@3d8 {
+		compatible = "apple,t6041-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x3d8 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "atc1_cio_usb";
+		power-domains = <&ps_atc1_cio>;
+	};
+};
+
+&{/aliases} {
+	usb4_1_rc = &usb4_1_acio;
+	usb4_1_nhi = &usb4_1_nhi;
+};
+
+&{/soc} {
+
+	usb4_1_mbox: mailbox@389108000 {
+		compatible = "apple,t6041-asc-mailbox", "apple,asc-mailbox-v4";
+		reg = <3 0x89108000 0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 944 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 945 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 946 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 947 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "send-empty", "send-not-empty",
+				  "recv-empty", "recv-not-empty";
+		#mbox-cells = <0>;
+	};
+	usb4_1_acio: cio@389ac0000 {
+		compatible = "apple,t6041-usb4-acio", "apple,t8103-usb4-acio";
+		reg = <3 0x89ac0000 0 0xc000>, <3 0x89080000 0 0x20000>;
+		reg-names = "rc", "sram";
+		mboxes = <&usb4_1_mbox>;
+		resets = <&cio_reset 1>;
+		power-domains = <&ps_atc1_cio>, <&ps_atc1_cio_pcie>,
+				<&ps_atc1_cio_usb>, <&ps_atc1_pcie>;
+		pinctrl-0 = <&acio1_pins>;
+		pinctrl-names = "default";
+		thunderbolt-switch;
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+		nonposted-mmio;
+
+		usb4_1_dart: iommu@389a80000 {
+			compatible = "apple,t6041-dart", "apple,t8110-dart";
+			reg = <3 0x89a80000 0 0xc000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 1837 IRQ_TYPE_LEVEL_HIGH>;
+			#iommu-cells = <1>;
+			apple,dma-range = /bits/ 64 <0x10000000000 0x30000000000>;
+		};
+		usb4_1_nhi: nhi@389f00000 {
+			compatible = "apple,t6041-usb4-nhi", "apple,t6040-usb4-nhi", "apple,t8103-usb4-nhi";
+			/* CIO v2 has no separate PDF register aperture. */
+			reg = <3 0x89f00000 0 0x100000>;
+			reg-names = "nhi";
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 1810 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 1811 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 1812 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 1813 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 1814 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 1815 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 1816 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 1817 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 1818 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 1819 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 1820 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 1821 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 1822 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 1823 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 1824 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 1825 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 1826 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 1827 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 1828 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 1829 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 1830 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 1831 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 1832 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 1833 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "txring0",
+				"txring1",
+				"txring2",
+				"txring3",
+				"txring4",
+				"txring5",
+				"txring6",
+				"txring7",
+				"txring8",
+				"txring9",
+				"txring10",
+				"txring11",
+				"rxring0",
+				"rxring1",
+				"rxring2",
+				"rxring3",
+				"rxring4",
+				"rxring5",
+				"rxring6",
+				"rxring7",
+				"rxring8",
+				"rxring9",
+				"rxring10",
+				"rxring11";
+			iommus = <&usb4_1_dart 0>,
+				<&usb4_1_dart 1>,
+				<&usb4_1_dart 2>,
+				<&usb4_1_dart 3>,
+				<&usb4_1_dart 4>,
+				<&usb4_1_dart 5>,
+				<&usb4_1_dart 6>,
+				<&usb4_1_dart 7>,
+				<&usb4_1_dart 8>,
+				<&usb4_1_dart 9>,
+				<&usb4_1_dart 10>,
+				<&usb4_1_dart 11>,
+				<&usb4_1_dart 16>,
+				<&usb4_1_dart 17>,
+				<&usb4_1_dart 18>,
+				<&usb4_1_dart 19>,
+				<&usb4_1_dart 20>,
+				<&usb4_1_dart 21>,
+				<&usb4_1_dart 22>,
+				<&usb4_1_dart 23>,
+				<&usb4_1_dart 24>,
+				<&usb4_1_dart 25>,
+				<&usb4_1_dart 26>,
+				<&usb4_1_dart 27>;
+			apple,thunderbolt-drom = [00];
+		};
+	};
+};
+
+&pinctrl_aop {
+	acio1_pins: acio0-pins {
+		pinmux = <APPLE_PINMUX(51, 1)>;
+	};
+};
+
+&typec1 {
+	ports {
+		port@2 {
+			reg = <2>;
+			typec1_thunderbolt: endpoint {
+				remote-endpoint = <&usb4_1_typec>;
+			};
+		};
+	};
+};
+
+&usb4_1_acio {
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		port@1 {
+			reg = <1>;
+			usb4_1_typec: endpoint {
+				remote-endpoint = <&typec1_thunderbolt>;
+			};
+		};
+	};
+};
+
+/* Explicitly enable all three controllers; this DTB is entirely untested. */
+&hpm0 { status = "okay"; };
+&hpm2 { status = "okay"; };
+&atcphy0 { status = "okay"; };
+&atcphy1 { status = "okay"; };
+&atcphy2 { status = "okay"; };
+&usb4_0_acio { status = "okay"; };
+&usb4_1_acio { status = "okay"; };
+&usb4_2_acio { status = "okay"; };

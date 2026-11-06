@@ -118,3 +118,6 @@ dtb-$(CONFIG_ARCH_APPLE) += t6041-j616c-dp-alt.dtb
 dtb-$(CONFIG_ARCH_APPLE) += t6041-j616c-tb5.dtb
 dtb-$(CONFIG_ARCH_APPLE) += t6041-j616c-usb.dtb
 dtb-$(CONFIG_ARCH_APPLE) += t6041-j616c-usb4-validation.dtb
+
+# TOTALLY UNTESTED: opt-in all-port Thunderbolt bring-up tree.
+dtb-$(CONFIG_ARCH_APPLE) += t6041-j616c-thunderbolt-all-ports-untested.dtb
