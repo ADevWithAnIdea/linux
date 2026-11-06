@@ -138,6 +138,8 @@
 #define TB_VSE_CAP_APPLE_CABLE_INFO_ACTIVE_CABLE BIT(2)
 #define TB_VSE_CAP_APPLE_CABLE_INFO_BIDIR_LSRX BIT(3)
 #define TB_VSE_CAP_APPLE_CABLE_INFO_20_GBPS BIT(4)
+/* CIO v2 native 80 Gb/s connection writes 0x801 to this capability. */
+#define TB_VSE_CAP_APPLE_CABLE_INFO_40_GBPS BIT(11)
 #define TB_VSE_CAP_APPLE_CABLE_INFO_LEGACY_ADAPTER BIT(9)
 #define TB_VSE_CAP_APPLE_CABLE_INFO_TBT2_3 BIT(10)
 
@@ -451,7 +453,9 @@ static void apple_nhi_ring_configure(struct tb_ring *ring, u32 flags, u32 e2e_fl
 
 		sof_eof_mask = ring->sof_mask << 16 | ring->eof_mask;
 		writel(sof_eof_mask, options + 4);
-		writel(sof_eof_mask, anhi->pdf_base + ring->hop * APPLE_CIO_NHI_PDF_STRIDE);
+		/* CIO v2 removed the separate packet-filter aperture. */
+		if (anhi->pdf_base)
+			writel(sof_eof_mask, anhi->pdf_base + ring->hop * APPLE_CIO_NHI_PDF_STRIDE);
 	}
 
 	/*
@@ -519,10 +523,15 @@ static int apple_nhi_probe(struct platform_device *pdev)
 	apple_tunable_apply(anhi->nhi_base, tunable);
 
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "pdf");
-	anhi->pdf_base = devm_ioremap_resource(&pdev->dev, res);
-	if (IS_ERR(anhi->pdf_base)) {
-		ret = dev_err_probe(&pdev->dev, PTR_ERR(anhi->pdf_base),
-				    "Unable to map PDF regs\n");
+	if (res) {
+		anhi->pdf_base = devm_ioremap_resource(&pdev->dev, res);
+		if (IS_ERR(anhi->pdf_base)) {
+			ret = dev_err_probe(&pdev->dev, PTR_ERR(anhi->pdf_base),
+					    "Unable to map PDF regs\n");
+			goto err;
+		}
+	} else if (!of_device_is_compatible(anhi->np, "apple,t6040-usb4-nhi")) {
+		ret = dev_err_probe(&pdev->dev, -EINVAL, "Missing PDF resource\n");
 		goto err;
 	}
 
@@ -873,6 +882,9 @@ static int apple_cio_tbt_switch_set(struct typec_thunderbolt_switch_dev *sw,
 			acio->target_cable_info |= TB_VSE_CAP_APPLE_CABLE_INFO_ACTIVE_CABLE;
 		if (FIELD_GET(EUDO_CABLE_SPEED_MASK, data->usb4.eudo) == EUDO_CABLE_SPEED_USB4_GEN3)
 			acio->target_cable_info |= TB_VSE_CAP_APPLE_CABLE_INFO_20_GBPS;
+		if (FIELD_GET(EUDO_CABLE_SPEED_MASK, data->usb4.eudo) == EUDO_CABLE_SPEED_USB4_GEN4 &&
+		    of_device_is_compatible(acio->np, "apple,t6041-usb4-acio"))
+			acio->target_cable_info |= TB_VSE_CAP_APPLE_CABLE_INFO_40_GBPS;
 		if (data->orientation == TYPEC_ORIENTATION_REVERSE)
 			acio->target_cable_info |= TB_VSE_CAP_APPLE_CABLE_INFO_ORIENTATION_REVERSE;
 		dev_dbg(acio->dev, "USB4 cable: eudo 0x%x, orientation %d -> cable info 0x%x\n",
