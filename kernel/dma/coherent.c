@@ -234,19 +234,24 @@ int dma_release_from_dev_coherent(struct device *dev, int order, void *vaddr)
 static int __dma_mmap_from_coherent(struct dma_coherent_mem *mem,
 		struct vm_area_struct *vma, void *vaddr, size_t size, int *ret)
 {
+	/* Handled with an error: do not fall through to an unsafe mapper. */
+	if (vma_is_p3s_4k(vma)) {
+		*ret = -ENXIO;
+		return 1;
+	}
+
 	if (mem && vaddr >= mem->virt_base && vaddr + size <=
 		   (mem->virt_base + ((dma_addr_t)mem->size << PAGE_SHIFT))) {
 		const pgoff_t pgoff_start = vma_start_pgoff(vma);
 		const pgoff_t pgoff_end = vma_end_pgoff(vma);
 		int start = (vaddr - mem->virt_base) >> PAGE_SHIFT;
-		unsigned long user_count = vma_pages(vma);
 		int count = PAGE_ALIGN(size) >> PAGE_SHIFT;
 
 		*ret = -ENXIO;
 		if (pgoff_start < count && pgoff_end <= count) {
 			unsigned long pfn = mem->pfn_base + start + pgoff_start;
 			*ret = remap_pfn_range(vma, vma->vm_start, pfn,
-					       user_count << PAGE_SHIFT,
+					       vma_size(vma),
 					       vma->vm_page_prot);
 		}
 		return 1;

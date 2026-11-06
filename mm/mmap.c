@@ -58,6 +58,7 @@
 #include <trace/events/mmap.h>
 
 #include "internal.h"
+#include <linux/p3s_user_pages.h>
 
 #ifndef arch_mmap_check
 #define arch_mmap_check(addr, len, flags)	(0)
@@ -585,12 +586,19 @@ unsigned long ksys_mmap_pgoff(unsigned long addr, unsigned long len,
 	struct file *file = NULL;
 	unsigned long retval;
 
+	if ((flags & MAP_HUGETLB) && mm_is_p3s_4k(current->mm))
+		return -EINVAL;
+
 	if (!(flags & MAP_ANONYMOUS)) {
 		audit_mmap_fd(fd, flags);
 		file = fget(fd);
 		if (!file)
 			return -EBADF;
 		if (is_file_hugepages(file)) {
+			if (mm_is_p3s_4k(current->mm)) {
+				retval = -EINVAL;
+				goto out_fput;
+			}
 			len = ALIGN(len, huge_page_size(hstate_file(file)));
 		} else if (unlikely(flags & MAP_HUGETLB)) {
 			retval = -EINVAL;
@@ -678,6 +686,8 @@ static inline unsigned long stack_guard_placement(vma_flags_t vma_flags)
 unsigned long vm_unmapped_area(struct vm_unmapped_area_info *info)
 {
 	unsigned long addr;
+
+	p3s_adjust_unmapped_area_info(info);
 
 	if (info->flags & VM_UNMAPPED_AREA_TOPDOWN)
 		addr = unmapped_area_topdown(info);
@@ -951,8 +961,9 @@ find_vma_prev(struct mm_struct *mm, unsigned long addr,
 	return vma;
 }
 
+#undef stack_guard_gap
 /* enforced gap between the expanding stack and other mappings. */
-unsigned long stack_guard_gap = 256UL<<PAGE_SHIFT;
+unsigned long stack_guard_gap = 256UL << PAGE_SHIFT_KERNEL;
 
 static int __init cmdline_parse_stack_guard_gap(char *p)
 {
@@ -961,7 +972,7 @@ static int __init cmdline_parse_stack_guard_gap(char *p)
 
 	val = simple_strtoul(p, &endptr, 10);
 	if (!*endptr)
-		stack_guard_gap = val << PAGE_SHIFT;
+		stack_guard_gap = val << PAGE_SHIFT_KERNEL;
 
 	return 1;
 }
@@ -1287,6 +1298,7 @@ unsigned long tear_down_vmas(struct mm_struct *mm, struct vma_iterator *vmi,
 /* Release all mmaps. */
 void exit_mmap(struct mm_struct *mm)
 {
+	P3S_CONTEXT_REMOTE_MM(mm);
 	struct mmu_gather tlb;
 	struct vm_area_struct *vma;
 	unsigned long nr_accounted = 0;
@@ -1755,7 +1767,7 @@ __latent_entropy int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 		if (vma_test(mpnt, VMA_ACCOUNT_BIT)) {
 			unsigned long len = vma_pages(mpnt);
 
-			if (security_vm_enough_memory_mm(oldmm, len)) /* sic */
+			if (security_vm_enough_memory_mm_private(oldmm, len)) /* sic */
 				goto fail_nomem;
 			charge = len;
 		}

@@ -37,6 +37,7 @@
 #include <asm/tlb.h>
 
 #include "internal.h"
+#include <linux/p3s_user_pages.h>
 
 static bool maybe_change_pte_writable(struct vm_area_struct *vma, pte_t pte)
 {
@@ -690,6 +691,8 @@ long change_protection(struct mmu_gather *tlb,
 	pgprot_t newprot = vma->vm_page_prot;
 	long pages;
 
+	P3S_CONTEXT_REMOTE_MM(vma->vm_mm);
+
 	/*
 	 * MM_CP_UFFD_{WP,RWP} and _RESOLVE are mutually exclusive within one
 	 * change, and WP and RWP cannot mix. Miswired callers get a warn and
@@ -812,7 +815,7 @@ mprotect_fixup(struct vma_iterator *vmi, struct mmu_gather *tlb,
 				VMA_ACCOUNT_BIT, VMA_WRITE_BIT, VMA_HUGETLB_BIT,
 				VMA_SHARED_BIT, VMA_NORESERVE_BIT)) {
 			charged = nrpages;
-			if (security_vm_enough_memory_mm(mm, charged))
+			if (security_vm_enough_memory_mm_private(mm, charged))
 				return -ENOMEM;
 			vma_flags_set(&new_vma_flags, VMA_ACCOUNT_BIT);
 		}

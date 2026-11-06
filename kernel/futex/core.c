@@ -40,6 +40,7 @@
 #include <linux/mempolicy.h>
 #include <linux/mmap_lock.h>
 #include <linux/pagemap.h>
+#include <linux/p3s.h>
 #include <linux/plist.h>
 #include <linux/prctl.h>
 #include <linux/rseq.h>
@@ -484,6 +485,20 @@ static u64 get_inode_sequence_number(struct inode *inode)
 	return get_object_id(&inode->i_sequence);
 }
 
+static int futex_get_shared_page(struct mm_struct *mm, unsigned long address,
+				unsigned int gup_flags, struct page **page,
+				unsigned long *offset)
+{
+	long ret;
+
+	if (!mm_is_p3s_4k(mm))
+		return get_user_pages_fast(address & PAGE_MASK, 1, gup_flags, page);
+
+	/* A file slice need not have the same offset as its virtual address. */
+	ret = p3s_get_user_page(mm, address, gup_flags, false, false, page, offset);
+	return ret ? ret : -EFAULT;
+}
+
 /**
  * get_futex_key() - Get parameters which are the keys for a futex
  * @uaddr:	virtual address of the futex
@@ -515,6 +530,7 @@ int get_futex_key(u32 __user *uaddr, unsigned int flags, union futex_key *key,
 		  enum futex_access rw)
 {
 	unsigned long address = (unsigned long)uaddr;
+	unsigned long page_offset;
 	struct mm_struct *mm = current->mm;
 	struct page *page;
 	struct folio *folio;
@@ -535,6 +551,7 @@ int get_futex_key(u32 __user *uaddr, unsigned int flags, union futex_key *key,
 	if (unlikely((address & (size-1)) != 0))
 		return -EINVAL;
 	address -= key->both.offset;
+	page_offset = key->both.offset;
 
 	if (unlikely(!access_ok(uaddr, size)))
 		return -EFAULT;
@@ -601,13 +618,16 @@ again:
 	if (unlikely(should_fail_futex(true)))
 		return -EFAULT;
 
-	err = get_user_pages_fast(address, 1, FOLL_WRITE, &page);
+	/* For 4K mms, capture the page and slice under the same mmap_lock. */
+	err = futex_get_shared_page(mm, (unsigned long)uaddr, FOLL_WRITE,
+				    &page, &page_offset);
 	/*
 	 * If write access is not required (eg. FUTEX_WAIT), try
 	 * and get read-only access.
 	 */
 	if (err == -EFAULT && rw == FUTEX_READ) {
-		err = get_user_pages_fast(address, 1, 0, &page);
+		err = futex_get_shared_page(mm, (unsigned long)uaddr, 0,
+					    &page, &page_offset);
 		ro = 1;
 	}
 	if (err < 0)
@@ -724,7 +744,7 @@ again:
 			goto again;
 		}
 
-		key->both.offset |= FUT_OFF_INODE; /* inode-based key */
+		key->both.offset = page_offset | FUT_OFF_INODE; /* inode-based key */
 		key->shared.i_seq = get_inode_sequence_number(inode);
 		key->shared.pgoff = page_pgoff(folio, page);
 		rcu_read_unlock();

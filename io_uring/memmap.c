@@ -8,6 +8,7 @@
 #include <linux/vmalloc.h>
 #include <linux/io_uring.h>
 #include <linux/io_uring_types.h>
+#include <linux/p3s/mm.h>
 #include <asm/shmparam.h>
 
 #include "memmap.h"
@@ -324,6 +325,9 @@ __cold int io_uring_mmap(struct file *file, struct vm_area_struct *vma)
 	struct io_mapped_region *region;
 	void *ptr;
 
+	if (mm_is_p3s_4k(current->mm))
+		return -EOPNOTSUPP;
+
 	guard(mutex)(&ctx->mmap_lock);
 
 	ptr = io_uring_validate_mmap_request(file, vma->vm_pgoff);
@@ -347,6 +351,9 @@ unsigned long io_uring_get_unmapped_area(struct file *filp, unsigned long addr,
 {
 	struct io_ring_ctx *ctx = filp->private_data;
 	void *ptr;
+
+	if (mm_is_p3s_4k(current->mm))
+		return -EOPNOTSUPP;
 
 	/*
 	 * Do not allow to map to user-provided address to avoid breaking the
@@ -414,6 +421,8 @@ int io_uring_mmap(struct file *file, struct vm_area_struct *vma)
 	struct io_mapped_region *region;
 	unsigned long i;
 
+	if (mm_is_p3s_4k(current->mm))
+		return -EOPNOTSUPP;
 	if (!is_nommu_shared_mapping(vma->vm_flags))
 		return -EINVAL;
 
@@ -449,6 +458,9 @@ unsigned long io_uring_get_unmapped_area(struct file *file, unsigned long addr,
 {
 	struct io_ring_ctx *ctx = file->private_data;
 	void *ptr;
+
+	if (mm_is_p3s_4k(current->mm))
+		return -EOPNOTSUPP;
 
 	guard(mutex)(&ctx->mmap_lock);
 

@@ -120,6 +120,7 @@
 
 #include "internal.h"
 #include "page_alloc.h"
+#include <linux/p3s_user_pages.h>
 
 /* Internal flags */
 #define MPOL_MF_DISCONTIG_OK (MPOL_MF_INTERNAL << 0)	/* Skip checks for continuous vmas */
@@ -3247,7 +3248,7 @@ int mpol_set_shared_policy(struct shared_policy *sp,
 			struct vm_area_struct *vma, struct mempolicy *pol)
 {
 	const pgoff_t pgoff = vma_start_pgoff(vma);
-	const pgoff_t pgoff_end = vma_end_pgoff(vma);
+	const pgoff_t pgoff_end = pgoff + vma_native_pages(vma);
 	struct sp_node *new = NULL;
 	int err;
 

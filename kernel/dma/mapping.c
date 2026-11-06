@@ -782,11 +782,14 @@ int dma_mmap_pages(struct device *dev, struct vm_area_struct *vma,
 	const pgoff_t pgoff_end = vma_end_pgoff(vma);
 	const unsigned long count = PAGE_ALIGN(size) >> PAGE_SHIFT;
 
+	if (vma_is_p3s_4k(vma))
+		return -ENXIO;
+
 	if (pgoff_start >= count || pgoff_end > count)
 		return -ENXIO;
 	return remap_pfn_range(vma, vma->vm_start,
 			       page_to_pfn(page) + pgoff_start,
-			       vma_pages(vma) << PAGE_SHIFT, vma->vm_page_prot);
+			       vma_size(vma), vma->vm_page_prot);
 }
 EXPORT_SYMBOL_GPL(dma_mmap_pages);
 

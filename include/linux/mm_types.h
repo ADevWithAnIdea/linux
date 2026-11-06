@@ -990,6 +990,9 @@ struct vm_area_struct {
 					   units */
 	struct file * vm_file;		/* File we map to (can be NULL). */
 	void * vm_private_data;		/* was vm_pte (shared mem) */
+#ifdef CONFIG_ARM64_PER_PROCESS_PAGE_SIZE
+	unsigned short vm_slice_off;	/* Subpage slice offset in host folio */
+#endif
 
 #ifdef CONFIG_SWAP
 	atomic_long_t swap_readahead_info;
@@ -1313,6 +1316,10 @@ struct mm_struct {
 #endif
 
 		struct percpu_counter rss_stat[NR_MM_COUNTERS];
+#ifdef CONFIG_ARM64_PER_PROCESS_PAGE_SIZE
+		/* Native backing pages, deduplicated within each slice window. */
+		atomic_long_t p3s_oom_pages;
+#endif
 
 		struct linux_binfmt *binfmt;
 
@@ -2010,5 +2017,8 @@ static inline unsigned long mmf_init_legacy_flags(unsigned long flags)
 			   (1UL << MMF_HAS_MDWE_NO_INHERIT));
 	return flags & MMF_INIT_LEGACY_MASK;
 }
+
+/* Keep at the end to ensure struct mm_struct and vm_area_struct are defined. */
+#include <linux/p3s.h>
 
 #endif /* _LINUX_MM_TYPES_H */

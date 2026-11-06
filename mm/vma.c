@@ -10,6 +10,7 @@
  */
 #include "vma_internal.h"
 #include "vma.h"
+#include <linux/p3s_user_pages.h>
 
 struct mmap_state {
 	struct mm_struct *mm;
@@ -19,6 +20,7 @@ struct mmap_state {
 	unsigned long end;
 	pgoff_t pgoff;
 	pgoff_t anon_pgoff;
+	unsigned short slice_off;
 	unsigned long pglen;
 	union {
 		vm_flags_t vm_flags;
@@ -53,9 +55,10 @@ struct mmap_state {
 		.vmi = vmi_,						\
 		.addr = addr_,						\
 		.end = (addr_) + (len_),				\
-		.pgoff = pgoff_,					\
+		.pgoff = (file_) ? mm_mmap_pgoff(mm_, pgoff_) : (pgoff_), \
 		.anon_pgoff = anon_pgoff_,				\
-		.pglen = PHYS_PFN(len_),				\
+		.slice_off = (file_) ? mm_mmap_slice_off(mm_, pgoff_) : 0, \
+		.pglen = (len_) >> PAGE_SHIFT,				\
 		.vma_flags = vma_flags_,				\
 		.file = file_,						\
 		.page_prot = vma_flags_to_page_prot(vma_flags_),	\
@@ -70,6 +73,7 @@ struct mmap_state {
 		.vma_flags = (map_)->vma_flags,				\
 		.pgoff = (map_)->pgoff,					\
 		.anon_pgoff = (map_)->anon_pgoff,			\
+		.slice_off = (map_)->slice_off,				\
 		.file = (map_)->file,					\
 		.prev = (map_)->prev,					\
 		.middle = vma_,						\
@@ -242,7 +246,7 @@ static bool can_vma_merge_before(struct vma_merge_struct *vmg)
 		return false;
 	if (!is_mergeable_anon_vma(vmg, /* merge_next = */ true))
 		return false;
-	if (vmg_end_pgoff(vmg) != vma_start_pgoff(vmg->next))
+	if (!vmg_can_merge_offsets(vmg, /* merge_next = */ true))
 		return false;
 	if (needs_adjacent_anon_pgoff(vmg) &&
 	    vmg_end_anon_pgoff(vmg) != vma_start_anon_pgoff(vmg->next))
@@ -265,7 +269,7 @@ static bool can_vma_merge_after(struct vma_merge_struct *vmg)
 		return false;
 	if (!is_mergeable_anon_vma(vmg, /* merge_next = */ false))
 		return false;
-	if (vma_end_pgoff(vmg->prev) != vmg_start_pgoff(vmg))
+	if (!vmg_can_merge_offsets(vmg, /* merge_next = */ false))
 		return false;
 	if (needs_adjacent_anon_pgoff(vmg) &&
 	    vma_end_anon_pgoff(vmg->prev) != vmg_start_anon_pgoff(vmg))
@@ -565,7 +569,8 @@ __split_vma(struct vma_iterator *vmi, struct vm_area_struct *vma,
 		new->vm_end = addr;
 	} else {
 		new->vm_start = addr;
-		vma_add_pgoff(new, linear_page_delta(vma, addr));
+		vma_set_split_offset(new, vma, addr);
+		vma_set_anon_pgoff(new, __linear_anon_page_index(vma, addr));
 	}
 
 	err = -ENOMEM;
@@ -604,7 +609,8 @@ __split_vma(struct vma_iterator *vmi, struct vm_area_struct *vma,
 
 	if (new_below) {
 		vma->vm_start = addr;
-		vma_add_pgoff(vma, linear_page_delta(new, addr));
+		vma_set_split_offset(vma, new, addr);
+		vma_set_anon_pgoff(vma, __linear_anon_page_index(new, addr));
 	} else {
 		vma->vm_end = addr;
 	}
@@ -748,56 +754,21 @@ void validate_mm(struct mm_struct *mm)
  */
 static void vmg_adjust_set_range(struct vma_merge_struct *vmg)
 {
-	if (vmg->__adjust_middle_start) {
-		/*
-		 * vmg->start    vmg->end
-		 * |             |
-		 * v    merge    v
-		 * <------------->
-		 *         delta
-		 *        <------>
-		 * |------|----------------|
-		 * | prev |    middle      |
-		 * |------|----------------|
-		 *        ^
-		 *        |
-		 *        middle->vm_start
-		 */
-		struct vm_area_struct *middle = vmg->middle;
-		const unsigned long delta = vmg->end - middle->vm_start;
+	struct vm_area_struct *adjust;
+	pgoff_t pgoff, anon_pgoff;
 
-		__vma_set_range(middle, vmg->end, middle->vm_end);
-		vma_add_pgoff(middle, delta >> PAGE_SHIFT);
-	} else if (vmg->__adjust_next_start) {
-		/*
-		 *                Originally:
-		 *
-		 *            vmg->start   vmg->end
-		 *            |            |
-		 *            v    merge   v
-		 *            <------------>
-		 *            .            .
-		 * merge_existing_range() updates to:
-		 *            .            .
-		 * vmg->start vmg->end     .
-		 * |          |            .
-		 * v  retain  v            .
-		 * <---------->            .
-		 *             delta       .
-		 *            <----->      .
-		 * |----------------|------|
-		 * |    middle      | next |
-		 * |----------------|------|
-		 *                  ^
-		 *                  |
-		 *                  next->vm_start
-		 */
-		struct vm_area_struct *next = vmg->next;
-		const unsigned long delta = next->vm_start - vmg->end;
+	if (vmg->__adjust_middle_start)
+		adjust = vmg->middle;
+	else if (vmg->__adjust_next_start)
+		adjust = vmg->next;
+	else
+		return;
 
-		__vma_set_range(next, vmg->end, next->vm_end);
-		vma_sub_pgoff(next, delta >> PAGE_SHIFT);
-	}
+	pgoff = vma_linear_page_index(vmg->__adjust_next_start ?
+				      vmg->middle : adjust, vmg->end);
+	anon_pgoff = __linear_anon_page_index(adjust, vmg->end);
+	vma_set_range_slice(adjust, vmg->end, adjust->vm_end, pgoff);
+	vma_set_anon_pgoff(adjust, anon_pgoff);
 }
 
 /*
@@ -841,8 +812,8 @@ static int commit_merge(struct vma_merge_struct *vmg)
 	 */
 	vma_adjust_trans_huge(vma, vmg->start, vmg->end,
 			      vmg->__adjust_middle_start ? vmg->middle : NULL);
-	vma_set_range(vma, vmg->start, vmg->end, vmg_start_pgoff(vmg),
-		      vmg_start_anon_pgoff(vmg));
+	vma_set_range_slice(vma, vmg->start, vmg->end, vmg_start_pgoff(vmg));
+	vma_set_anon_pgoff(vma, vmg_start_anon_pgoff(vmg));
 	vmg_adjust_set_range(vmg);
 	vma_iter_store_overwrite(vmg->vmi, vmg->target);
 
@@ -1053,7 +1024,7 @@ static __must_check struct vm_area_struct *vma_merge_existing_range(
 
 		if (vmg->__remove_middle) {
 			vmg->end = next->vm_end;
-			vmg->pgoff = vma_start_pgoff(next) - pglen;
+			vmg->pgoff = vma_start_pgoff(middle);
 			vmg->anon_pgoff = vma_start_anon_pgoff(next) - pglen;
 		} else {
 			/* We shrink middle and expand next. */
@@ -1224,6 +1195,13 @@ static struct vm_area_struct *vma_merge_copied_range(struct vma_merge_struct *vm
 	VM_WARN_ON_VMG(!vmg->middle, vmg);
 
 	vmg->copied_from = vmg->middle;
+	/*
+	 * The slice at the start of the copied range, not at the source VMA's
+	 * start: the range may begin anywhere in it. mremap keeps the new
+	 * address congruent to the old one modulo the host page, as
+	 * copy_vma_set_range() relies on too.
+	 */
+	vmg->slice_off = vma_slice_offset(vmg->middle, vmg->start);
 	vmg->middle = NULL;
 	return vma_merge_new_range(vmg);
 }
@@ -1419,8 +1397,11 @@ static void vms_complete_munmap_vmas(struct vma_munmap_struct *vms,
 	if (vms->unlock)
 		mmap_write_downgrade(mm);
 
-	if (!vms->nr_pages)
+	if (!vms->vma_count) {
+		if (vms->unlock)
+			mmap_read_unlock(mm);
 		return;
+	}
 
 	vms_clear_ptes(vms, mas_detach, !vms->unlock);
 	/* Update high watermark before we lower total_vm */
@@ -1978,9 +1959,11 @@ struct vm_area_struct *copy_vma(struct vm_area_struct **vmap,
 	if (new_vma && new_vma->vm_start < addr + len)
 		return NULL;	/* should never get here */
 
+	vmg.prev = vma_filter_merge_neighbor(vmg.prev, vma, !can_self_merge);
 	vmg.pgoff = pgoff;
 	vmg.anon_pgoff = anon_pgoff;
-	vmg.next = vma_iter_next_rewind(&vmi, NULL);
+	vmg.next = vma_filter_merge_neighbor(vma_iter_next_rewind(&vmi, NULL),
+					     vma, !can_self_merge);
 
 	/*
 	 * If the original VMA is kept (MREMAP_DONTUNMAP), the source and
@@ -2022,7 +2005,8 @@ struct vm_area_struct *copy_vma(struct vm_area_struct **vmap,
 		new_vma = vm_area_dup(vma);
 		if (!new_vma)
 			goto out;
-		vma_set_range(new_vma, addr, addr + len, pgoff, anon_pgoff);
+		copy_vma_set_range(new_vma, vma, addr, len, pgoff, !can_self_merge);
+		vma_set_anon_pgoff(new_vma, anon_pgoff);
 		if (vma_dup_policy(vma, new_vma))
 			goto out_free_vma;
 		if (anon_vma_clone(new_vma, vma, VMA_OP_REMAP))
@@ -2088,7 +2072,8 @@ static int anon_vma_compatible(struct vm_area_struct *a, struct vm_area_struct *
 	if (!vma_flags_empty(&diff))
 		return false;
 	/* Page offset must align. */
-	if (vma_end_pgoff(a) != vma_start_pgoff(b))
+	if (!vma_can_merge_offsets(a, vma_start_pgoff(b), vma_slice_off(b),
+				   b->vm_start, vma_is_p3s_4k(a), !!a->vm_file))
 		return false;
 	/* Only reached from anon path, so either MAP_PRIVATE file or anon. */
 	if (vma_end_anon_pgoff(a) != vma_start_anon_pgoff(b))
@@ -2580,7 +2565,7 @@ static int __mmap_setup(struct mmap_state *map, struct vm_area_desc *desc,
 		map->charged = map->pglen;
 		map->charged -= vms->nr_accounted;
 		if (map->charged) {
-			error = security_vm_enough_memory_mm(map->mm, map->charged);
+			error = security_vm_enough_memory_mm_private(map->mm, map->charged);
 			if (error)
 				return error;
 		}
@@ -2678,6 +2663,7 @@ static int __mmap_new_vma(struct mmap_state *map, struct vm_area_struct **vmap,
 		vma_set_anonymous(vma);
 
 	vma_set_range(vma, map->addr, map->end, map->pgoff, map->anon_pgoff);
+	vma_set_slice_off(vma, map->slice_off);
 	vma->flags = map->vma_flags;
 	vma->vm_page_prot = map->page_prot;
 
@@ -3031,7 +3017,7 @@ int do_brk_flags(struct vma_iterator *vmi, struct vm_area_struct *vma,
 	if (mm->map_count > get_sysctl_max_map_count())
 		return -ENOMEM;
 
-	if (security_vm_enough_memory_mm(mm, len >> PAGE_SHIFT))
+	if (security_vm_enough_memory_mm_private(mm, len >> PAGE_SHIFT))
 		return -ENOMEM;
 
 	/*
@@ -3233,7 +3219,7 @@ static int acct_stack_growth(struct vm_area_struct *vma,
 	 * Overcommit..  This must be the final test, as it will
 	 * update security statistics.
 	 */
-	if (security_vm_enough_memory_mm(mm, grow))
+	if (security_vm_enough_memory_mm_private(mm, grow))
 		return -ENOMEM;
 
 	return 0;
@@ -3332,6 +3318,7 @@ int expand_upwards(struct vm_area_struct *vma, unsigned long address)
 int expand_downwards(struct vm_area_struct *vma, unsigned long address)
 {
 	struct mm_struct *mm = vma->vm_mm;
+	P3S_CONTEXT_REMOTE_MM(mm);
 	struct vm_area_struct *prev;
 	int error = 0;
 	VMA_ITERATOR(vmi, mm, vma->vm_start);
@@ -3386,8 +3373,8 @@ int expand_downwards(struct vm_area_struct *vma, unsigned long address)
 					mm->locked_vm += grow;
 				vm_stat_account(mm, vma->vm_flags, grow);
 				anon_rmap_tree_pre_update_vma(vma);
-				vma->vm_start = address;
-				vma_sub_pgoff(vma, grow);
+				vma_set_anon_pgoff(vma, vma_start_anon_pgoff(vma) - grow);
+				vma_expand_downwards_range(vma, address, grow);
 				/* Overwrite old entry in mtree. */
 				vma_iter_store_overwrite(&vmi, vma);
 				anon_rmap_tree_post_update_vma(vma);
@@ -3426,13 +3413,14 @@ int __vm_munmap(unsigned long start, size_t len, bool unlock)
  */
 int insert_vm_struct(struct mm_struct *mm, struct vm_area_struct *vma)
 {
+	P3S_CONTEXT_REMOTE_MM(mm);
 	unsigned long charged = vma_pages(vma);
 
 	if (find_vma_intersection(mm, vma->vm_start, vma->vm_end))
 		return -ENOMEM;
 
 	if (vma_test(vma, VMA_ACCOUNT_BIT) &&
-	     security_vm_enough_memory_mm(mm, charged))
+	     security_vm_enough_memory_mm_private(mm, charged))
 		return -ENOMEM;
 
 	/*

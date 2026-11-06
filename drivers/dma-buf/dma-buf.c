@@ -228,6 +228,7 @@ static struct file_system_type dma_buf_fs_type = {
 static int dma_buf_mmap_internal(struct file *file, struct vm_area_struct *vma)
 {
 	struct dma_buf *dmabuf;
+	unsigned long nr_pages = DIV_ROUND_UP(vma_size(vma), PAGE_SIZE);
 
 	if (!is_dma_buf_file(file))
 		return -EINVAL;
@@ -238,9 +239,13 @@ static int dma_buf_mmap_internal(struct file *file, struct vm_area_struct *vma)
 	if (!dmabuf->ops->mmap)
 		return -EINVAL;
 
-	/* check for overflowing the buffer's size */
-	if (vma->vm_pgoff + vma_pages(vma) >
-	    dmabuf->size >> PAGE_SHIFT)
+	/* Exporters interpret vm_pgoff in native pages, without a slice offset. */
+	if (vma_slice_off(vma))
+		return -EINVAL;
+
+	/* Check the extent in the same native-page units as the buffer. */
+	if (vma->vm_pgoff > dmabuf->size >> PAGE_SHIFT ||
+	    nr_pages > (dmabuf->size >> PAGE_SHIFT) - vma->vm_pgoff)
 		return -EINVAL;
 
 	DMA_BUF_TRACE(trace_dma_buf_mmap_internal, dmabuf);
@@ -1603,6 +1608,8 @@ EXPORT_SYMBOL_NS_GPL(dma_buf_end_cpu_access, "DMA_BUF");
 int dma_buf_mmap(struct dma_buf *dmabuf, struct vm_area_struct *vma,
 		 unsigned long pgoff)
 {
+	unsigned long nr_pages;
+
 	if (WARN_ON(!dmabuf || !vma))
 		return -EINVAL;
 
@@ -1610,18 +1617,22 @@ int dma_buf_mmap(struct dma_buf *dmabuf, struct vm_area_struct *vma,
 	if (!dmabuf->ops->mmap)
 		return -EINVAL;
 
+	/* pgoff is in native pages, even for 4KB tasks. */
+	nr_pages = DIV_ROUND_UP(vma_size(vma), PAGE_SIZE);
+
 	/* check for offset overflow */
-	if (pgoff + vma_pages(vma) < pgoff)
+	if (pgoff + nr_pages < pgoff)
 		return -EOVERFLOW;
 
 	/* check for overflowing the buffer's size */
-	if (pgoff + vma_pages(vma) >
+	if (pgoff + nr_pages >
 	    dmabuf->size >> PAGE_SHIFT)
 		return -EINVAL;
 
 	/* readjust the vma */
 	vma_set_file(vma, dmabuf->file);
 	vma->vm_pgoff = pgoff;
+	vma_set_slice_off(vma, 0);
 
 	DMA_BUF_TRACE(trace_dma_buf_mmap, dmabuf);
 

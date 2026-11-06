@@ -18,6 +18,7 @@
 #include <linux/types.h>
 #include <linux/uaccess.h>
 #include <linux/uio.h>
+#include <asm/p3s/mte.h>
 
 #include <asm/barrier.h>
 #include <asm/cpufeature.h>
@@ -488,9 +489,8 @@ static int __access_remote_tags(struct mm_struct *mm, unsigned long addr,
 		else
 			WARN_ON_ONCE(!page_mte_tagged(page) && !is_zero_page(page));
 
-		/* limit access to the end of the page */
-		offset = offset_in_page(addr);
-		tags = min(len, (PAGE_SIZE - offset) / MTE_GRANULE_SIZE);
+		/* Limit access to the end of the process page */
+		mte_remote_tags_chunk(vma, addr, len, &offset, &tags);
 
 		maddr = page_address(page);
 		if (write) {
