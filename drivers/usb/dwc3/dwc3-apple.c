@@ -122,6 +122,10 @@ struct dwc3_apple {
 	struct reset_control *reset;
 	struct apple_tunable *host_tunable;
 	void __iomem *cfg_regs;
+	void __iomem *link_regs;
+	void __iomem *bulk_regs;
+	struct apple_tunable *link_host_tunable;
+	struct apple_tunable *bulk_tunable;
 	struct apple_tunable *cfg_host_tunable;
 	struct usb_role_switch *role_sw;
 	bool ss_port_disabled;
@@ -323,6 +327,14 @@ static int dwc3_apple_init(struct dwc3_apple *appledwc, enum dwc3_apple_state st
 	 */
 	apple_tunable_apply(appledwc->dwc.regs, appledwc->host_tunable);
 	apple_tunable_apply(appledwc->cfg_regs, appledwc->cfg_host_tunable);
+	if (appledwc->link_regs && state == DWC3_APPLE_HOST) {
+		/* J616c native host link configuration, then board-specific fields. */
+		writel(0xc0018000, appledwc->link_regs + 0x20);
+		apple_tunable_apply(appledwc->link_regs, appledwc->link_host_tunable);
+		apple_tunable_apply(appledwc->bulk_regs, appledwc->bulk_tunable);
+		writel(8, appledwc->cfg_regs + 0x800);
+		writel(0x600, appledwc->cfg_regs + 0x60);
+	}
 
 	/*
 	 * Now that the core is initialized and already went through dwc3_core_soft_reset we can
@@ -340,7 +352,9 @@ static int dwc3_apple_init(struct dwc3_apple *appledwc, enum dwc3_apple_state st
 		 * has already been configured to the correct mode earlier.
 		 */
 		dwc3_enable_susphy(&appledwc->dwc, true);
-		phy_set_mode(appledwc->dwc.usb3_generic_phy[0], PHY_MODE_USB_HOST);
+		ret = phy_set_mode(appledwc->dwc.usb3_generic_phy[0], PHY_MODE_USB_HOST);
+		if (ret)
+			goto core_exit;
 		appledwc->ss_port_disabled = false;
 		ret = dwc3_host_init(&appledwc->dwc);
 		if (ret) {
@@ -723,6 +737,33 @@ static int dwc3_apple_probe(struct platform_device *pdev)
 		appledwc->cfg_regs = devm_ioremap_resource(dev, cfg);
 		if (IS_ERR(appledwc->cfg_regs))
 			return PTR_ERR(appledwc->cfg_regs);
+	}
+
+	if (of_device_is_compatible(dev->of_node, "apple,t6040-dwc3")) {
+		static const char * const resources[] = { "link", "bulk" };
+		static const char * const properties[] = {
+			"apple,tunable-link-host", "apple,tunable-bulk",
+		};
+		void __iomem **maps[] = { &appledwc->link_regs, &appledwc->bulk_regs };
+		struct apple_tunable **tables[] = {
+			&appledwc->link_host_tunable, &appledwc->bulk_tunable,
+		};
+
+		if (!appledwc->cfg_regs) {
+			appledwc->cfg_regs = devm_platform_ioremap_resource_byname(pdev, "dwc3-cfg");
+			if (IS_ERR(appledwc->cfg_regs))
+				return PTR_ERR(appledwc->cfg_regs);
+		}
+		for (int i = 0; i < ARRAY_SIZE(resources); i++) {
+			struct resource *res = platform_get_resource_byname(pdev, IORESOURCE_MEM, resources[i]);
+
+			*maps[i] = devm_ioremap_resource(dev, res);
+			if (IS_ERR(*maps[i]))
+				return PTR_ERR(*maps[i]);
+			*tables[i] = devm_apple_tunable_parse(dev, dev->of_node, properties[i], res);
+			if (IS_ERR(*tables[i]))
+				return PTR_ERR(*tables[i]);
+		}
 	}
 
 	appledwc->apple_regs = devm_platform_ioremap_resource_byname(pdev, "dwc3-apple");
