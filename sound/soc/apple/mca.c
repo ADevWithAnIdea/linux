@@ -26,6 +26,7 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/dmaengine.h>
 #include <linux/of.h>
 #include <linux/property.h>
 #include <linux/of_clk.h>
@@ -109,7 +110,6 @@
 #define REG_RX_SERDES_PORT	0x04
 
 /* Relative to switch base */
-#define REG_DMA_ADAPTER_A(cl)	(0x8000 * (cl))
 #define REG_DMA_ADAPTER_B(cl)	(0x8000 * (cl) + 0x4000)
 #define DMA_ADAPTER_TX_LSB_PAD	GENMASK(4, 0)
 #define DMA_ADAPTER_TX_NCHANS	GENMASK(6, 5)
@@ -120,8 +120,8 @@
 #define SWITCH_STRIDE	0x8000
 #define CLUSTER_STRIDE	0x4000
 
-/* T8132 only, relative to cluster base: staged enables and their latch */
-#define REG_T8132_CLOCK_ENABLE	0x100
+/* T8132 only, relative to controller base: staged enables and their latch */
+#define REG_T8132_OUTPUT_CLOCK_SEL(n)	(0x100 + 4 * (n))
 #define REG_T8132_OUTPUT_SET	0x140
 #define REG_T8132_OUTPUT_CLR	0x144
 #define REG_T8132_TX_SET	0x160
@@ -158,6 +158,7 @@ struct mca_cluster {
 
 	unsigned int bclk_ratio;
 	unsigned long configured_bclk;
+	u32 mclk_sel_flags;
 
 	/* Masks etc. picked up via the set_tdm_slot method */
 	int tdm_slots;
@@ -170,6 +171,7 @@ struct mca_data {
 	struct device *dev;
 
 	__iomem void *switch_base;
+	__iomem void *base;
 	const struct mca_variant *variant;
 
 	struct device *pd_dev;
@@ -192,6 +194,8 @@ struct mca_data {
 
 struct mca_variant {
 	unsigned int cluster_stride;
+	unsigned int aperture_size;
+	unsigned int adapter_stride;
 	unsigned int group_off[8];
 	unsigned int switch_off;	/* inside the cluster region if switch_in_cluster */
 	bool switch_in_cluster;
@@ -206,6 +210,7 @@ struct mca_variant {
 
 static const struct mca_variant mca_t8103_variant = {
 	.cluster_stride = CLUSTER_STRIDE,
+	.adapter_stride = SWITCH_STRIDE,
 	.group_off = { 0x000, 0x100, 0x200, 0x300, 0x400, 0x500, 0x600, 0x700 },
 	.dma_adapter_flags = FIELD_PREP_CONST(DMA_ADAPTER_TX_NCHANS, 0x2) |
 			     FIELD_PREP_CONST(DMA_ADAPTER_RX_NCHANS, 0x2),
@@ -215,13 +220,14 @@ static const struct mca_variant mca_t8103_variant = {
 };
 
 /*
- * T8132 keeps a cluster's clocks and syncgen at 0x2000, its port at 0x2060,
- * the TX serializer at 0x6000 and the DMA adapter at 0x8000, so a cluster
- * spans 0xc000. Whether further clusters follow at that stride is not
- * verified; the device tree maps exactly one. Capture routing is unknown.
+ * T8132 has separate banks for clocks, ports, serializers and adapters.
+ * Each bank contains 0x100-byte units; the global enable registers are shared.
+ * Capture routing is not yet supported.
  */
 static const struct mca_variant mca_t8132_variant = {
-	.cluster_stride = 0xc000,
+	.cluster_stride = 0x100,
+	.aperture_size = 0xc000,
+	.adapter_stride = 0x100,
 	.group_off = { 0x2000, 0x2020, MCA_GROUP_UNMAPPED, 0x6000, MCA_GROUP_UNMAPPED,
 		       MCA_GROUP_UNMAPPED, 0x2060, MCA_GROUP_UNMAPPED },
 	.switch_off = 0x8000,
@@ -315,11 +321,11 @@ static void mca_fe_early_trigger(struct snd_pcm_substream *substream, int cmd,
 /* T8132 stages the output mux and TX enables, then latches both. */
 static void mca_fe_trigger_staged(struct mca_cluster *cl, bool enable)
 {
-	writel_relaxed(BIT(cl->no), cl->base +
+	writel_relaxed(BIT(cl->no), cl->host->base +
 		       (enable ? REG_T8132_OUTPUT_SET : REG_T8132_OUTPUT_CLR));
-	writel_relaxed(BIT(cl->no), cl->base +
+	writel_relaxed(BIT(cl->no), cl->host->base +
 		       (enable ? REG_T8132_TX_SET : REG_T8132_TX_CLR));
-	writel_relaxed(BIT(cl->no), cl->base + REG_T8132_LATCH);
+	writel_relaxed(1, cl->host->base + REG_T8132_LATCH);
 }
 
 static int mca_fe_trigger(struct snd_pcm_substream *substream, int cmd,
@@ -396,6 +402,7 @@ static int mca_fe_enable_clocks(struct mca_cluster *cl)
 	 * the power state driver would error out on seeing the device
 	 * as clock-gated.
 	 */
+	WARN_ON(cl->pd_link);
 	cl->pd_link = device_link_add(mca->dev, cl->pd_dev,
 				      DL_FLAG_STATELESS | DL_FLAG_PM_RUNTIME |
 					      DL_FLAG_RPM_ACTIVE);
@@ -406,7 +413,7 @@ static int mca_fe_enable_clocks(struct mca_cluster *cl)
 		return -EINVAL;
 	}
 
-	writel_relaxed((cl->no + 1) | mca->variant->mclk_sel_flags,
+	writel_relaxed((cl->no + 1) | cl->mclk_sel_flags,
 		       mca_reg(cl, REG_SYNCGEN_MCLK_SEL));
 	mca_modify(cl, REG_SYNCGEN_STATUS, SYNCGEN_STATUS_EN,
 		   SYNCGEN_STATUS_EN);
@@ -420,7 +427,11 @@ static void mca_fe_disable_clocks(struct mca_cluster *cl)
 	mca_modify(cl, REG_SYNCGEN_STATUS, SYNCGEN_STATUS_EN, 0);
 	mca_modify(cl, REG_STATUS, STATUS_MCLK_EN, 0);
 
-	device_link_del(cl->pd_link);
+	if (cl->pd_link) {
+		device_link_del(cl->pd_link);
+		cl->pd_link = NULL;
+	}
+
 	clk_disable_unprepare(cl->clk_parent);
 }
 
@@ -446,33 +457,6 @@ static bool mca_fe_clocks_in_use(struct mca_cluster *cl)
 	return false;
 }
 
-static int mca_be_hw_free(struct snd_pcm_substream *substream,
-			  struct snd_soc_dai *dai)
-{
-	struct mca_cluster *cl = mca_dai_to_cluster(dai);
-	struct mca_data *mca = cl->host;
-	struct mca_cluster *fe_cl;
-
-	if (cl->port_clk_driver < 0)
-		return -EINVAL;
-
-	/*
-	 * We are operating on a foreign cluster here, but since we
-	 * belong to the same PCM, accesses should have been
-	 * synchronized at ASoC level.
-	 */
-	fe_cl = &mca->clusters[cl->port_clk_driver];
-	if (!mca_fe_clocks_in_use(fe_cl))
-		return 0; /* Nothing to do */
-
-	cl->clocks_in_use[substream->stream] = false;
-
-	if (!mca_fe_clocks_in_use(fe_cl))
-		mca_fe_disable_clocks(fe_cl);
-
-	return 0;
-}
-
 static int mca_fe_prepare(struct snd_pcm_substream *substream,
 			  struct snd_soc_dai *dai)
 {
@@ -486,6 +470,7 @@ static int mca_fe_prepare(struct snd_pcm_substream *substream,
 	if (!cl->syncgen_in_use) {
 		int port = ffs(mca_fe_get_portmask(substream));
 
+		WARN_ON(cl->pd_link);
 		cl->pd_link = device_link_add(mca->dev, cl->pd_dev,
 					      DL_FLAG_STATELESS | DL_FLAG_PM_RUNTIME |
 						DL_FLAG_RPM_ACTIVE);
@@ -517,8 +502,10 @@ static int mca_fe_hw_free(struct snd_pcm_substream *substream,
 		return 0;
 
 	mca_modify(cl, REG_SYNCGEN_STATUS, SYNCGEN_STATUS_EN, 0);
-	if (cl->pd_link)
+	if (cl->pd_link) {
 		device_link_del(cl->pd_link);
+		cl->pd_link = NULL;
+	}
 
 	return 0;
 }
@@ -693,6 +680,11 @@ static int mca_fe_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	if (!fpol_inv)
 		goto err;
 
+	/* The banked sync generator must follow the serializer's clock edge. */
+	cl->mclk_sel_flags = mca->variant->mclk_sel_flags;
+	if (mca->variant->staged_enables && !(serdes_conf & SERDES_CONF_BCLK_POL))
+		cl->mclk_sel_flags &= ~BIT(9);
+
 	mca_modify(cl, CLUSTER_TX_OFF + REG_TX_SERDES_CONF,
 		   SERDES_CONF_BCLK_POL, serdes_conf);
 	if (mca->variant->has_rx)
@@ -744,9 +736,11 @@ static int mca_fe_set_clocks_divider(struct mca_cluster *cl, unsigned long bclk_
 	writel_relaxed(0, mca_reg(cl, REG_SYNCGEN_HI_PERIOD));
 	writel_relaxed(bclk_ratio - 2, mca_reg(cl, REG_SYNCGEN_LO_PERIOD));
 	/* Required for output on this generation; their meaning is not known. */
-	writel_relaxed(0x10, mca->switch_base + REG_T8132_SWITCH_UNK_08);
-	writel_relaxed(1, mca->switch_base + REG_T8132_SWITCH_UNK_04);
-	writel_relaxed(1, cl->base + REG_T8132_CLOCK_ENABLE);
+	writel_relaxed(0x10, mca->switch_base + cl->no * mca->variant->adapter_stride +
+		       REG_T8132_SWITCH_UNK_08);
+	writel_relaxed(1, mca->switch_base + cl->no * mca->variant->adapter_stride +
+		       REG_T8132_SWITCH_UNK_04);
+	writel_relaxed(cl->no + 1, mca->base + REG_T8132_OUTPUT_CLOCK_SEL(cl->no));
 	cl->configured_bclk = bit_rate;
 	return 0;
 }
@@ -836,11 +830,11 @@ static int mca_fe_hw_params(struct snd_pcm_substream *substream,
 		regval |= FIELD_PREP(DMA_ADAPTER_RX_MSB_PAD, pad);
 
 #ifndef USE_RXB_FOR_CAPTURE
-	writel_relaxed(regval, mca->switch_base + REG_DMA_ADAPTER_A(cl->no));
+	writel_relaxed(regval, mca->switch_base + mca->variant->adapter_stride * cl->no);
 #else
 	if (is_tx)
 		writel_relaxed(regval,
-			       mca->switch_base + REG_DMA_ADAPTER_A(cl->no));
+			       mca->switch_base + mca->variant->adapter_stride * cl->no);
 	else
 		writel_relaxed(regval,
 			       mca->switch_base + REG_DMA_ADAPTER_B(cl->no));
@@ -979,7 +973,8 @@ static int mca_be_startup(struct snd_pcm_substream *substream,
 	fe_cl = mca_dai_to_cluster(snd_soc_rtd_to_cpu(fe, 0));
 
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
-		writel_relaxed(PORT_DATA_SEL_TXA(fe_cl->no),
+		writel_relaxed(mca->variant->staged_enables ? BIT(fe_cl->no) :
+			       PORT_DATA_SEL_TXA(fe_cl->no),
 			       mca_reg(cl, REG_PORT_DATA_SEL));
 		mca_modify(cl, REG_PORT_ENABLES, PORT_ENABLES_TX_DATA,
 			   PORT_ENABLES_TX_DATA);
@@ -1003,6 +998,10 @@ static int mca_be_startup(struct snd_pcm_substream *substream,
 
 	writel_relaxed(FIELD_PREP(PORT_CLOCK_SEL, fe_cl->no + 1),
 		       mca_reg(cl, REG_PORT_CLOCK_SEL));
+
+	writel_relaxed(PORT_DATA_SEL_TXA(fe_cl->no),
+		       mca_reg(cl, REG_PORT_DATA_SEL));
+
 	mca_modify(cl, REG_PORT_ENABLES, PORT_ENABLES_CLOCKS,
 		   PORT_ENABLES_CLOCKS);
 
@@ -1021,6 +1020,26 @@ static void mca_be_shutdown(struct snd_pcm_substream *substream,
 	struct mca_cluster *cl = mca_dai_to_cluster(dai);
 	struct mca_cluster *fe_cl;
 	struct mca_data *mca = cl->host;
+
+	if (cl->clocks_in_use[substream->stream] &&
+	    !WARN_ON(cl->port_clk_driver < 0)) {
+		struct mca_cluster *fe_clk_cl = &mca->clusters[cl->port_clk_driver];
+
+		/*
+		 * Typically the CODECs we are paired with will require clocks
+		 * to be present at time of mute with the 'mute_stream' op.
+		 * We need to disable the clocks here at the earliest (hw_free
+		 * would be too early).
+		 *
+		 * We are operating on a foreign cluster here, but since we
+		 * belong to the same PCM, accesses should have been
+		 * synchronized at ASoC level.
+		 */
+		cl->clocks_in_use[substream->stream] = false;
+
+		if (!mca_fe_clocks_in_use(fe_clk_cl))
+			mca_fe_disable_clocks(fe_clk_cl);
+	}
 
 	if (!fe)
 		return;
@@ -1049,7 +1068,6 @@ static void mca_be_shutdown(struct snd_pcm_substream *substream,
 
 static const struct snd_soc_dai_ops mca_be_ops = {
 	.prepare = mca_be_prepare,
-	.hw_free = mca_be_hw_free,
 	.startup = mca_be_startup,
 	.shutdown = mca_be_shutdown,
 };
@@ -1273,8 +1291,10 @@ static void apple_mca_release(struct mca_data *mca)
 			dev_pm_domain_detach(cl->pd_dev, true);
 	}
 
-	if (mca->pd_link)
+	if (mca->pd_link) {
 		device_link_del(mca->pd_link);
+		mca->pd_link = NULL;
+	}
 
 	if (!IS_ERR_OR_NULL(mca->pd_dev))
 		dev_pm_domain_detach(mca->pd_dev, true);
@@ -1300,15 +1320,20 @@ static int apple_mca_probe(struct platform_device *pdev)
 	if (IS_ERR(base))
 		return PTR_ERR(base);
 
-	if (resource_size(res) < variant->cluster_stride)
+	if (resource_size(res) < (variant->aperture_size ?: variant->cluster_stride))
 		return -EINVAL;
-	nclusters = resource_size(res) / variant->cluster_stride;
+	nclusters = variant->aperture_size ? of_count_phandle_with_args(pdev->dev.of_node,
+						"clocks", "#clock-cells") :
+		resource_size(res) / variant->cluster_stride;
+	if (nclusters < 1 || nclusters > MAX_NCLUSTERS)
+		return -EINVAL;
 
 	mca = devm_kzalloc(&pdev->dev, struct_size(mca, clusters, nclusters),
 			   GFP_KERNEL);
 	if (!mca)
 		return -ENOMEM;
 	mca->dev = &pdev->dev;
+	mca->base = base;
 	mca->variant = variant;
 	mca->nclusters = nclusters;
 	mutex_init(&mca->port_mutex);
@@ -1426,6 +1451,26 @@ static int apple_mca_probe(struct platform_device *pdev)
 		if (!be->playback.stream_name || !be->capture.stream_name) {
 			ret = -ENOMEM;
 			goto err_release;
+		}
+	}
+
+	/*
+	 * The PCMs only request their DMA channels when a sound card binds.
+	 * ASoC turns -EPROBE_DEFER at that point into a parked card that is
+	 * retried only when another ASoC component registers, and "dmas" is an
+	 * optional fw_devlink supplier, so nothing orders this probe after the
+	 * DMA controller. If the controller comes up a little later, the card
+	 * never appears. Wait for it here instead, before the component exists.
+	 */
+	if (of_property_present(pdev->dev.of_node, "dmas")) {
+		struct dma_chan *chan = dma_request_chan(&pdev->dev, "tx0a");
+
+		if (IS_ERR(chan)) {
+			ret = PTR_ERR(chan);
+			if (ret == -EPROBE_DEFER)
+				goto err_release;
+		} else {
+			dma_release_channel(chan);
 		}
 	}
 
