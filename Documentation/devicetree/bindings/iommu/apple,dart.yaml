@@ -29,7 +29,10 @@ properties:
           - apple,t8110-dart
           - apple,t6000-dart
       - items:
-          - const: apple,t6020-dart
+          - enum:
+              - apple,t6020-dart
+              - apple,t8122-dart
+              - apple,t8142-dart
           - const: apple,t8110-dart
 
   reg:
